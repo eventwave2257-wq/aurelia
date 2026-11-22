@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix Remix Remix AURELIA",
+  "description": "Accessible driver cockpit, specialized medical and disability appointment dispatch, and separate earnings analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,190 @@
+{
+  "entities": {
+    "DriverAccount": {
+      "title": "DriverAccount",
+      "description": "Driver fleet configuration, vehicle registration, approval status, UPI payout handle, and fare optimizer preferences.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "cityRegion": { "type": "string", "maxLength": 160 },
+        "yearsExperience": { "type": "number" },
+        "vehicleMake": { "type": "string", "maxLength": 60 },
+        "vehicleModel": { "type": "string", "maxLength": 100 },
+        "vehicleYear": { "type": "number" },
+        "vehicleTier": { "type": "string", "enum": ["bike", "car_economy", "car_premier", "car_elite"] },
+        "selectedDistrictId": { "type": "string", "maxLength": 60 },
+        "activeFareCondition": {
+          "type": "string",
+          "enum": ["standard_19", "off_peak_corridor", "long_distance", "high_earning_zone", "peak_traffic_fair", "care_priority"]
+        },
+        "approvalStatus": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "vehicleApprovalStatus": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "backgroundCheckStatus": { "type": "string", "maxLength": 40 },
+        "upiId": { "type": "string", "maxLength": 100 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "fullName", "vehicleTier", "selectedDistrictId", "activeFareCondition", "approvalStatus", "vehicleApprovalStatus", "updatedAt"]
+    },
+    "DriverPrivateInfo": {
+      "title": "DriverPrivateInfo",
+      "description": "Isolated PII record containing driver phone, email, commercial license plate, and license badge ID.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "licensePlate": { "type": "string", "maxLength": 40 },
+        "licenseNumber": { "type": "string", "maxLength": 60 },
+        "licenseDocName": { "type": "string", "maxLength": 120 },
+        "vehicleDocName": { "type": "string", "maxLength": 120 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "phone", "licensePlate", "updatedAt"]
+    },
+    "TripRecord": {
+      "title": "TripRecord",
+      "description": "Completed trip fare, distance, and payout telemetry persisted under the owning driver.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "category": { "type": "string", "maxLength": 40 },
+        "vehicleTier": { "type": "string", "maxLength": 30 },
+        "serviceLabel": { "type": "string", "maxLength": 120 },
+        "riderOrPatientName": { "type": "string", "maxLength": 120 },
+        "routeSummary": { "type": "string", "maxLength": 200 },
+        "distanceKm": { "type": "number" },
+        "durationMins": { "type": "number" },
+        "baseFare": { "type": "number" },
+        "careStipend": { "type": "number" },
+        "tip": { "type": "number" },
+        "completedAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "category", "serviceLabel", "routeSummary", "distanceKm", "baseFare", "createdAt"]
+    },
+    "CareAppointmentRecord": {
+      "title": "CareAppointmentRecord",
+      "description": "Medical & wheelchair care slot linked to an owning driver.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "patientName": { "type": "string", "maxLength": 120 },
+        "category": { "type": "string", "maxLength": 40 },
+        "destinationFacility": { "type": "string", "maxLength": 160 },
+        "scheduledDate": { "type": "string", "maxLength": 20 },
+        "scheduledTime": { "type": "string", "maxLength": 10 },
+        "claimed": { "type": "boolean" },
+        "completed": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["open", "claimed", "completed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "patientName", "category", "status", "createdAt", "updatedAt"]
+    },
+    "LiveRideOrder": {
+      "title": "LiveRideOrder",
+      "description": "Shared live ride booking connecting Customer App, Driver Matching/GPS tracking, and CCAvenue payment status.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "customerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "customerName": { "type": "string", "maxLength": 120 },
+        "driverId": { "type": "string", "maxLength": 128 },
+        "driverName": { "type": "string", "maxLength": 120 },
+        "pickupLabel": { "type": "string", "maxLength": 160 },
+        "dropoffLabel": { "type": "string", "maxLength": 160 },
+        "vehicleTier": { "type": "string", "enum": ["bike", "car_economy", "car_premier", "car_elite"] },
+        "fareCondition": {
+          "type": "string",
+          "enum": ["standard_19", "off_peak_corridor", "long_distance", "high_earning_zone", "peak_traffic_fair", "care_priority"]
+        },
+        "distanceKm": { "type": "number" },
+        "fareInr": { "type": "number" },
+        "driverNetInr": { "type": "number" },
+        "companyFeeInr": { "type": "number" },
+        "tipInr": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["ccavenue_upi", "ccavenue_card", "ccavenue_netbanking", "cash"] },
+        "paymentStatus": { "type": "string", "enum": ["pending", "paid", "refunded"] },
+        "ccavenueOrderId": { "type": "string", "maxLength": 100 },
+        "ccavenueTrackingId": { "type": "string", "maxLength": 100 },
+        "ccavenueBankRefNo": { "type": "string", "maxLength": 100 },
+        "driverLat": { "type": "number" },
+        "driverLng": { "type": "number" },
+        "status": { "type": "string", "enum": ["searching", "matched", "en_route", "arrived", "in_trip", "completed", "cancelled"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "customerId", "pickupLabel", "dropoffLabel", "vehicleTier", "fareCondition", "distanceKm", "fareInr", "paymentMethod", "paymentStatus", "status", "createdAt", "updatedAt"]
+    },
+    "DriverPayoutRecord": {
+      "title": "DriverPayoutRecord",
+      "description": "UPI driver settlement and payment reconciliation ledger entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "driverId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "driverName": { "type": "string", "maxLength": 120 },
+        "upiId": { "type": "string", "maxLength": 100 },
+        "grossCollectedInr": { "type": "number" },
+        "companyFeeInr": { "type": "number" },
+        "netPayoutInr": { "type": "number" },
+        "utrReference": { "type": "string", "maxLength": 80 },
+        "status": { "type": "string", "enum": ["pending", "reconciled", "failed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "driverId", "upiId", "netPayoutInr", "status", "createdAt", "updatedAt"]
+    },
+    "SupportComplaint": {
+      "title": "SupportComplaint",
+      "description": "Ride dispute, fare adjustment, or safety complaint managed in the Admin Panel.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reporterUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reporterRole": { "type": "string", "enum": ["customer", "driver"] },
+        "rideId": { "type": "string", "maxLength": 64 },
+        "subject": { "type": "string", "maxLength": 140 },
+        "details": { "type": "string", "maxLength": 600 },
+        "status": { "type": "string", "enum": ["open", "investigating", "resolved"] },
+        "resolutionNote": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "reporterUid", "reporterRole", "subject", "details", "status", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/drivers/{driverId}": {
+      "schema": { "$ref": "#/entities/DriverAccount" },
+      "description": "Driver account, approval workflow, UPI payout handle, and fare optimizer settings."
+    },
+    "/drivers/{driverId}/private/pii": {
+      "schema": { "$ref": "#/entities/DriverPrivateInfo" },
+      "description": "PII-isolated driver contact and uploaded document references."
+    },
+    "/drivers/{driverId}/trips/{tripId}": {
+      "schema": { "$ref": "#/entities/TripRecord" },
+      "description": "Completed trip history subcollection scoped to owning driver."
+    },
+    "/drivers/{driverId}/appointments/{appointmentId}": {
+      "schema": { "$ref": "#/entities/CareAppointmentRecord" },
+      "description": "Special care appointments scoped to owning driver."
+    },
+    "/rides/{rideId}": {
+      "schema": { "$ref": "#/entities/LiveRideOrder" },
+      "description": "Live rides shared between Customer booking, Driver matching/GPS updates, and Admin oversight."
+    },
+    "/payouts/{payoutId}": {
+      "schema": { "$ref": "#/entities/DriverPayoutRecord" },
+      "description": "UPI driver payout & reconciliation ledger."
+    },
+    "/complaints/{complaintId}": {
+      "schema": { "$ref": "#/entities/SupportComplaint" },
+      "description": "Customer & driver complaints managed by Admin."
+    }
+  }
+}

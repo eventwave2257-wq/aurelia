@@ -1,0 +1,397 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened reusable primitives
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(ownerUid) {
+      return isSignedIn() && request.auth.uid == ownerUid;
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn() && request.auth.token.email == 'eventwave2257@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() ||
+        (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidVehicleTier(tier) {
+      return tier in ['bike', 'car_economy', 'car_premier', 'car_elite'];
+    }
+
+    function isValidFareCondition(cond) {
+      return cond in [
+        'standard_19',
+        'off_peak_corridor',
+        'long_distance',
+        'high_earning_zone',
+        'peak_traffic_fair',
+        'care_priority'
+      ];
+    }
+
+    // Entity validation blueprints
+    function isValidDriverAccount(data, driverId) {
+      return data.keys().hasAll([
+          'uid',
+          'fullName',
+          'vehicleTier',
+          'selectedDistrictId',
+          'activeFareCondition',
+          'approvalStatus',
+          'vehicleApprovalStatus',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid',
+          'fullName',
+          'cityRegion',
+          'yearsExperience',
+          'vehicleMake',
+          'vehicleModel',
+          'vehicleYear',
+          'vehicleTier',
+          'selectedDistrictId',
+          'activeFareCondition',
+          'approvalStatus',
+          'vehicleApprovalStatus',
+          'backgroundCheckStatus',
+          'upiId',
+          'updatedAt'
+        ]) &&
+        data.uid == driverId &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+        (!data.keys().hasAny(['cityRegion']) || (data.cityRegion is string && data.cityRegion.size() <= 160)) &&
+        (!data.keys().hasAny(['yearsExperience']) || (data.yearsExperience is number && data.yearsExperience >= 0 && data.yearsExperience <= 60)) &&
+        (!data.keys().hasAny(['vehicleMake']) || (data.vehicleMake is string && data.vehicleMake.size() <= 60)) &&
+        (!data.keys().hasAny(['vehicleModel']) || (data.vehicleModel is string && data.vehicleModel.size() <= 100)) &&
+        (!data.keys().hasAny(['vehicleYear']) || (data.vehicleYear is number && data.vehicleYear >= 2005 && data.vehicleYear <= 2030)) &&
+        isValidVehicleTier(data.vehicleTier) &&
+        data.selectedDistrictId is string && data.selectedDistrictId.size() >= 1 && data.selectedDistrictId.size() <= 60 &&
+        isValidFareCondition(data.activeFareCondition) &&
+        data.approvalStatus in ['pending', 'approved', 'rejected'] &&
+        data.vehicleApprovalStatus in ['pending', 'approved', 'rejected'] &&
+        (!data.keys().hasAny(['backgroundCheckStatus']) || (data.backgroundCheckStatus is string && data.backgroundCheckStatus.size() <= 40)) &&
+        (!data.keys().hasAny(['upiId']) || (data.upiId is string && data.upiId.size() <= 100)) &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidDriverPrivateInfo(data, driverId) {
+      return data.keys().hasAll(['uid', 'email', 'phone', 'licensePlate', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'phone', 'licensePlate', 'licenseNumber', 'licenseDocName', 'vehicleDocName', 'updatedAt']) &&
+        data.uid == driverId &&
+        data.uid == request.auth.uid &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 30 &&
+        data.licensePlate is string && data.licensePlate.size() >= 3 && data.licensePlate.size() <= 40 &&
+        (!data.keys().hasAny(['licenseNumber']) || (data.licenseNumber is string && data.licenseNumber.size() <= 60)) &&
+        (!data.keys().hasAny(['licenseDocName']) || (data.licenseDocName is string && data.licenseDocName.size() <= 120)) &&
+        (!data.keys().hasAny(['vehicleDocName']) || (data.vehicleDocName is string && data.vehicleDocName.size() <= 120)) &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidTripRecord(data, tripId, driverId) {
+      return data.keys().hasAll(['id', 'ownerUid', 'category', 'serviceLabel', 'routeSummary', 'distanceKm', 'baseFare', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'ownerUid', 'category', 'vehicleTier', 'serviceLabel', 'riderOrPatientName', 'routeSummary', 'distanceKm', 'durationMins', 'baseFare', 'careStipend', 'tip', 'completedAt', 'createdAt']) &&
+        data.id == tripId &&
+        data.ownerUid == driverId &&
+        data.ownerUid == request.auth.uid &&
+        data.category is string && data.category.size() >= 1 && data.category.size() <= 40 &&
+        (!data.keys().hasAny(['vehicleTier']) || isValidVehicleTier(data.vehicleTier)) &&
+        data.serviceLabel is string && data.serviceLabel.size() >= 1 && data.serviceLabel.size() <= 120 &&
+        (!data.keys().hasAny(['riderOrPatientName']) || (data.riderOrPatientName is string && data.riderOrPatientName.size() <= 120)) &&
+        data.routeSummary is string && data.routeSummary.size() >= 1 && data.routeSummary.size() <= 200 &&
+        data.distanceKm is number && data.distanceKm >= 0 && data.distanceKm <= 2000 &&
+        (!data.keys().hasAny(['durationMins']) || (data.durationMins is number && data.durationMins >= 0 && data.durationMins <= 1440)) &&
+        data.baseFare is number && data.baseFare >= 0 && data.baseFare <= 200000 &&
+        (!data.keys().hasAny(['careStipend']) || (data.careStipend is number && data.careStipend >= 0 && data.careStipend <= 50000)) &&
+        (!data.keys().hasAny(['tip']) || (data.tip is number && data.tip >= 0 && data.tip <= 25000)) &&
+        (!data.keys().hasAny(['completedAt']) || (data.completedAt is string && data.completedAt.size() <= 64)) &&
+        data.createdAt == request.time;
+    }
+
+    function isValidCareAppointmentRecord(data, appointmentId, driverId) {
+      return data.keys().hasAll(['id', 'ownerUid', 'patientName', 'category', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerUid', 'patientName', 'category', 'destinationFacility', 'scheduledDate', 'scheduledTime', 'claimed', 'completed', 'status', 'createdAt', 'updatedAt']) &&
+        data.id == appointmentId &&
+        data.ownerUid == driverId &&
+        data.ownerUid == request.auth.uid &&
+        data.patientName is string && data.patientName.size() >= 1 && data.patientName.size() <= 120 &&
+        data.category is string && data.category.size() >= 1 && data.category.size() <= 40 &&
+        (!data.keys().hasAny(['destinationFacility']) || (data.destinationFacility is string && data.destinationFacility.size() <= 160)) &&
+        (!data.keys().hasAny(['scheduledDate']) || (data.scheduledDate is string && data.scheduledDate.size() <= 20)) &&
+        (!data.keys().hasAny(['scheduledTime']) || (data.scheduledTime is string && data.scheduledTime.size() <= 10)) &&
+        (!data.keys().hasAny(['claimed']) || data.claimed is bool) &&
+        (!data.keys().hasAny(['completed']) || data.completed is bool) &&
+        data.status in ['open', 'claimed', 'completed'] &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidLiveRideOrder(data, rideId) {
+      return data.keys().hasAll([
+          'id', 'customerId', 'pickupLabel', 'dropoffLabel', 'vehicleTier',
+          'fareCondition', 'distanceKm', 'fareInr', 'paymentMethod', 'paymentStatus',
+          'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'customerId', 'customerName', 'driverId', 'driverName',
+          'pickupLabel', 'dropoffLabel', 'vehicleTier', 'fareCondition',
+          'distanceKm', 'fareInr', 'driverNetInr', 'companyFeeInr', 'tipInr',
+          'paymentMethod', 'paymentStatus', 'ccavenueOrderId', 'ccavenueTrackingId', 'ccavenueBankRefNo',
+          'razorpayOrderId', 'razorpayPaymentId',
+          'driverLat', 'driverLng', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id == rideId &&
+        data.customerId is string && data.customerId.size() >= 1 && data.customerId.size() <= 128 &&
+        (!data.keys().hasAny(['customerName']) || (data.customerName is string && data.customerName.size() <= 120)) &&
+        (!data.keys().hasAny(['driverId']) || (data.driverId is string && data.driverId.size() <= 128)) &&
+        (!data.keys().hasAny(['driverName']) || (data.driverName is string && data.driverName.size() <= 120)) &&
+        data.pickupLabel is string && data.pickupLabel.size() >= 1 && data.pickupLabel.size() <= 160 &&
+        data.dropoffLabel is string && data.dropoffLabel.size() >= 1 && data.dropoffLabel.size() <= 160 &&
+        isValidVehicleTier(data.vehicleTier) &&
+        isValidFareCondition(data.fareCondition) &&
+        data.distanceKm is number && data.distanceKm >= 0 && data.distanceKm <= 2000 &&
+        data.fareInr is number && data.fareInr >= 0 && data.fareInr <= 200000 &&
+        (!data.keys().hasAny(['driverNetInr']) || (data.driverNetInr is number && data.driverNetInr >= 0 && data.driverNetInr <= 200000)) &&
+        (!data.keys().hasAny(['companyFeeInr']) || (data.companyFeeInr is number && data.companyFeeInr >= 0 && data.companyFeeInr <= 50000)) &&
+        (!data.keys().hasAny(['tipInr']) || (data.tipInr is number && data.tipInr >= 0 && data.tipInr <= 5000)) &&
+        data.paymentMethod in ['ccavenue_upi', 'ccavenue_card', 'ccavenue_netbanking', 'razorpay_upi', 'razorpay_card', 'cash'] &&
+        data.paymentStatus in ['pending', 'paid', 'refunded'] &&
+        (!data.keys().hasAny(['ccavenueOrderId']) || (data.ccavenueOrderId is string && data.ccavenueOrderId.size() <= 100)) &&
+        (!data.keys().hasAny(['ccavenueTrackingId']) || (data.ccavenueTrackingId is string && data.ccavenueTrackingId.size() <= 100)) &&
+        (!data.keys().hasAny(['ccavenueBankRefNo']) || (data.ccavenueBankRefNo is string && data.ccavenueBankRefNo.size() <= 100)) &&
+        (!data.keys().hasAny(['razorpayOrderId']) || (data.razorpayOrderId is string && data.razorpayOrderId.size() <= 100)) &&
+        (!data.keys().hasAny(['razorpayPaymentId']) || (data.razorpayPaymentId is string && data.razorpayPaymentId.size() <= 100)) &&
+        (!data.keys().hasAny(['driverLat']) || (data.driverLat is number && data.driverLat >= -90 && data.driverLat <= 90)) &&
+        (!data.keys().hasAny(['driverLng']) || (data.driverLng is number && data.driverLng >= -180 && data.driverLng <= 180)) &&
+        data.status in ['searching', 'matched', 'en_route', 'arrived', 'in_trip', 'completed', 'cancelled'] &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidPayoutRecord(data, payoutId) {
+      return data.keys().hasAll(['id', 'driverId', 'upiId', 'netPayoutInr', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'driverId', 'driverName', 'upiId', 'grossCollectedInr', 'companyFeeInr', 'netPayoutInr', 'utrReference', 'status', 'createdAt', 'updatedAt']) &&
+        data.id == payoutId &&
+        data.driverId is string && data.driverId.size() >= 1 && data.driverId.size() <= 128 &&
+        (!data.keys().hasAny(['driverName']) || (data.driverName is string && data.driverName.size() <= 120)) &&
+        data.upiId is string && data.upiId.size() >= 3 && data.upiId.size() <= 100 &&
+        (!data.keys().hasAny(['grossCollectedInr']) || (data.grossCollectedInr is number && data.grossCollectedInr >= 0)) &&
+        (!data.keys().hasAny(['companyFeeInr']) || (data.companyFeeInr is number && data.companyFeeInr >= 0)) &&
+        data.netPayoutInr is number && data.netPayoutInr > 0 && data.netPayoutInr <= 500000 &&
+        (!data.keys().hasAny(['utrReference']) || (data.utrReference is string && data.utrReference.size() <= 80)) &&
+        data.status in ['pending', 'reconciled', 'failed'] &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidComplaint(data, complaintId) {
+      return data.keys().hasAll(['id', 'reporterUid', 'reporterRole', 'subject', 'details', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'reporterUid', 'reporterRole', 'rideId', 'subject', 'details', 'status', 'resolutionNote', 'createdAt', 'updatedAt']) &&
+        data.id == complaintId &&
+        data.reporterUid is string && data.reporterUid.size() >= 1 && data.reporterUid.size() <= 128 &&
+        data.reporterRole in ['customer', 'driver'] &&
+        (!data.keys().hasAny(['rideId']) || (data.rideId is string && data.rideId.size() <= 64)) &&
+        data.subject is string && data.subject.size() >= 2 && data.subject.size() <= 140 &&
+        data.details is string && data.details.size() >= 2 && data.details.size() <= 600 &&
+        data.status in ['open', 'investigating', 'resolved'] &&
+        (!data.keys().hasAny(['resolutionNote']) || (data.resolutionNote is string && data.resolutionNote.size() <= 300)) &&
+        data.updatedAt == request.time;
+    }
+
+    // Connection check document (read-only ping)
+    match /test/connection {
+      allow get: if true;
+    }
+
+    // Driver account root document
+    match /drivers/{driverId} {
+      allow get: if isValidId(driverId) && (isOwner(driverId) || isAdmin());
+      allow list: if isBootstrappedAdmin();
+      allow create: if isOwner(driverId) &&
+        isValidId(driverId) &&
+        isValidDriverAccount(incoming(), driverId) &&
+        incoming().approvalStatus == 'pending' &&
+        incoming().vehicleApprovalStatus == 'pending';
+      allow update: if isValidId(driverId) &&
+        isValidDriverAccount(incoming(), driverId) &&
+        incoming().uid == existing().uid &&
+        (
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
+            'approvalStatus', 'vehicleApprovalStatus', 'backgroundCheckStatus', 'updatedAt'
+          ])) ||
+          (isOwner(driverId) &&
+            incoming().approvalStatus == existing().approvalStatus &&
+            incoming().vehicleApprovalStatus == existing().vehicleApprovalStatus &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'fullName', 'cityRegion', 'yearsExperience', 'vehicleMake', 'vehicleModel',
+              'vehicleYear', 'vehicleTier', 'selectedDistrictId', 'activeFareCondition',
+              'upiId', 'updatedAt'
+            ]))
+        );
+      allow delete: if isOwner(driverId) && isValidId(driverId);
+
+      // PII Isolation Subcollection
+      match /private/pii {
+        allow get: if isValidId(driverId) && isOwner(driverId);
+        allow create: if isOwner(driverId) &&
+          isValidId(driverId) &&
+          exists(/databases/$(database)/documents/drivers/$(driverId)) &&
+          isValidDriverPrivateInfo(incoming(), driverId);
+        allow update: if isOwner(driverId) &&
+          isValidId(driverId) &&
+          isValidDriverPrivateInfo(incoming(), driverId) &&
+          incoming().uid == existing().uid &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'email', 'phone', 'licensePlate', 'licenseNumber', 'licenseDocName', 'vehicleDocName', 'updatedAt'
+          ]);
+        allow delete: if isOwner(driverId) && isValidId(driverId);
+      }
+
+      // Trip History Subcollection
+      match /trips/{tripId} {
+        allow get: if isValidId(driverId) && isValidId(tripId) && (isOwner(driverId) || isAdmin());
+        allow list: if isOwner(driverId) && resource.data.ownerUid == request.auth.uid;
+        allow create: if isOwner(driverId) &&
+          isValidId(driverId) &&
+          isValidId(tripId) &&
+          exists(/databases/$(database)/documents/drivers/$(driverId)) &&
+          isValidTripRecord(incoming(), tripId, driverId);
+        allow update: if false;
+        allow delete: if isOwner(driverId) && isValidId(driverId) && isValidId(tripId);
+      }
+
+      // Special Care Appointments Subcollection
+      match /appointments/{appointmentId} {
+        allow get: if isValidId(driverId) && isValidId(appointmentId) && isOwner(driverId);
+        allow list: if isOwner(driverId) && resource.data.ownerUid == request.auth.uid;
+        allow create: if isOwner(driverId) &&
+          isValidId(driverId) &&
+          isValidId(appointmentId) &&
+          exists(/databases/$(database)/documents/drivers/$(driverId)) &&
+          isValidCareAppointmentRecord(incoming(), appointmentId, driverId) &&
+          incoming().createdAt == request.time;
+        allow update: if isOwner(driverId) &&
+          isValidId(driverId) &&
+          isValidCareAppointmentRecord(incoming(), appointmentId, driverId) &&
+          existing().status != 'completed' &&
+          incoming().id == existing().id &&
+          incoming().ownerUid == existing().ownerUid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'claimed', 'completed', 'status', 'updatedAt'
+          ]);
+        allow delete: if isOwner(driverId) && isValidId(driverId) && isValidId(appointmentId);
+      }
+    }
+
+    // Live rides collection connecting Customer + Driver + Admin
+    match /rides/{rideId} {
+      allow get: if isValidId(rideId) && isSignedIn() && (
+        resource.data.customerId == request.auth.uid ||
+        resource.data.driverId == request.auth.uid ||
+        resource.data.status == 'searching' ||
+        isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.customerId == request.auth.uid ||
+        resource.data.driverId == request.auth.uid ||
+        resource.data.status == 'searching' ||
+        isBootstrappedAdmin()
+      );
+      allow create: if isSignedIn() &&
+        isValidId(rideId) &&
+        isValidLiveRideOrder(incoming(), rideId) &&
+        incoming().customerId == request.auth.uid &&
+        incoming().status == 'searching' &&
+        incoming().createdAt == request.time;
+      allow update: if isSignedIn() &&
+        isValidId(rideId) &&
+        isValidLiveRideOrder(incoming(), rideId) &&
+        existing().status != 'completed' &&
+        existing().status != 'cancelled' &&
+        incoming().id == existing().id &&
+        incoming().customerId == existing().customerId &&
+        incoming().createdAt == existing().createdAt &&
+        (
+          isAdmin() ||
+          // Customer cancels, pays via CCAvenue, or adds an in-trip tip
+          (existing().customerId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly([
+            'status', 'paymentStatus', 'ccavenueTrackingId', 'ccavenueBankRefNo', 'updatedAt'
+          ])) ||
+          (existing().customerId == request.auth.uid && existing().status == 'in_trip' && incoming().diff(existing()).affectedKeys().hasOnly([
+            'tipInr', 'updatedAt'
+          ])) ||
+          // Driver claims a searching ride or updates GPS coordinates, tip, & trip stage
+          (existing().status == 'searching' && incoming().driverId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly([
+            'driverId', 'driverName', 'driverLat', 'driverLng', 'status', 'updatedAt'
+          ])) ||
+          (existing().driverId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly([
+            'driverLat', 'driverLng', 'status', 'paymentStatus', 'tipInr', 'updatedAt'
+          ]))
+        );
+      allow delete: if isAdmin() && isValidId(rideId);
+    }
+
+    // UPI Payout & Reconciliation ledger
+    match /payouts/{payoutId} {
+      allow get: if isValidId(payoutId) && (isOwner(resource.data.driverId) || isAdmin());
+      allow list: if isSignedIn() && (resource.data.driverId == request.auth.uid || isBootstrappedAdmin());
+      allow create: if isSignedIn() &&
+        isValidId(payoutId) &&
+        isValidPayoutRecord(incoming(), payoutId) &&
+        incoming().driverId == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time;
+      allow update: if isAdmin() &&
+        isValidId(payoutId) &&
+        isValidPayoutRecord(incoming(), payoutId) &&
+        existing().status != 'reconciled' &&
+        incoming().id == existing().id &&
+        incoming().driverId == existing().driverId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'utrReference', 'updatedAt']);
+      allow delete: if isAdmin() && isValidId(payoutId);
+    }
+
+    // Complaints collection
+    match /complaints/{complaintId} {
+      allow get: if isValidId(complaintId) && (isOwner(resource.data.reporterUid) || isAdmin());
+      allow list: if isSignedIn() && (resource.data.reporterUid == request.auth.uid || isBootstrappedAdmin());
+      allow create: if isSignedIn() &&
+        isValidId(complaintId) &&
+        isValidComplaint(incoming(), complaintId) &&
+        incoming().reporterUid == request.auth.uid &&
+        incoming().status == 'open' &&
+        incoming().createdAt == request.time;
+      allow update: if isAdmin() &&
+        isValidId(complaintId) &&
+        isValidComplaint(incoming(), complaintId) &&
+        existing().status != 'resolved' &&
+        incoming().id == existing().id &&
+        incoming().reporterUid == existing().reporterUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'resolutionNote', 'updatedAt']);
+      allow delete: if isAdmin() && isValidId(complaintId);
+    }
+  }
+}

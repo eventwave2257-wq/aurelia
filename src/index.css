@@ -1,0 +1,82 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --font-display: 'Syne', 'Plus Jakarta Sans', sans-serif;
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  html.large-assist {
+    font-size: 18px;
+  }
+
+  h1, h2, .font-display {
+    font-family: var(--font-display);
+    letter-spacing: -0.025em;
+  }
+
+  .font-mono-tabular {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Gen Z Modern Elite ambient mesh + architectural grid canvas */
+.aurelia-genz-bg {
+  background-color: #f4f5f8;
+  background-image:
+    radial-gradient(ellipse 68% 48% at 12% 0%, rgba(212, 175, 99, 0.16) 0%, transparent 62%),
+    radial-gradient(ellipse 56% 44% at 92% 10%, rgba(16, 185, 129, 0.12) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 42% at 50% 100%, rgba(99, 102, 241, 0.08) 0%, transparent 65%),
+    linear-gradient(to right, rgba(15, 23, 42, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(15, 23, 42, 0.03) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 100% 100%, 40px 40px, 40px 40px;
+  background-attachment: fixed;
+}
+
+.dark .aurelia-genz-bg {
+  background-color: #06070a;
+  background-image:
+    radial-gradient(ellipse 72% 48% at 14% -4%, rgba(212, 175, 99, 0.15) 0%, transparent 62%),
+    radial-gradient(ellipse 58% 44% at 92% 8%, rgba(16, 185, 129, 0.13) 0%, transparent 60%),
+    radial-gradient(ellipse 52% 40% at 48% 100%, rgba(99, 102, 241, 0.1) 0%, transparent 65%),
+    linear-gradient(to right, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 100% 100%, 40px 40px, 40px 40px;
+  background-attachment: fixed;
+}
+
+/* Accessible focus rings in champagne gold / emerald */
+:focus-visible {
+  outline: 2px solid #b48a3e;
+  outline-offset: 2px;
+}
+
+.dark :focus-visible {
+  outline-color: #e6c77e;
+}
+
+/* Respect reduced motion globally or via manual toggle */
+html.reduced-motion *,
+html.reduced-motion *::before,
+html.reduced-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
