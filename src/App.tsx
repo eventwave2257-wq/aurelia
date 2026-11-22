@@ -27,8 +27,10 @@ import { DriverOnboardingModal } from './components/DriverOnboardingModal';
 import { EarningsAnalyticsView } from './components/EarningsAnalyticsView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { PassengerRatingModal } from './components/PassengerRatingModal';
+import { OfflineIndicator, PWAInstallButton } from './components/PwaInstallButton';
 import { FirebaseProvider, useFirebase } from './context/FirebaseContext';
 import { GoogleMapsSdkProvider } from './context/GoogleMapsSdkContext';
+import { KARNATAKA_31_DISTRICTS } from './data/karnatakaDistricts';
 import {
   INITIAL_CARE_APPOINTMENTS,
   INITIAL_COMPLETED_TRIPS,
@@ -47,8 +49,10 @@ import type {
   DriverPreferences,
   DriverProfileData,
   DriverTripPhase,
+  GeoPoint,
   KarnatakaDistrict,
   LiveRideOrder,
+  LiveTrackingSource,
   PassengerMultiPointRating,
   PlannedRouteSummary,
   RideOffer,
@@ -58,6 +62,8 @@ import {
   calculateFlatRideTransfer,
   computeSeparateEarningsAnalysis,
   getVehicleTierLabel,
+  interpolateLiveTrackingPosition,
+  resolveOfferGeoEndpoints,
   roundCurrency,
   sortOffersByPriority,
 } from './utils/aureliaLogic';
@@ -142,6 +148,9 @@ function AureliaWorkspace() {
   const [chatbotOpen, setChatbotOpen] = useState<boolean>(false);
   const [gameOpen, setGameOpen] = useState<boolean>(false);
   const [onboardingVerified, setOnboardingVerified] = useState<boolean>(shouldAutostart);
+  const [activeTripElapsedSeconds, setActiveTripElapsedSeconds] = useState<number>(0);
+  const [liveTrackingSource, setLiveTrackingSource] = useState<LiveTrackingSource>('corridor_sim');
+  const [driverLivePosition, setDriverLivePosition] = useState<GeoPoint | null>(null);
   const [adminUnlocked, setAdminUnlocked] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     try {
@@ -156,6 +165,112 @@ function AureliaWorkspace() {
     window.addEventListener('gmp-quota-exceeded', onQuotaExceeded);
     return () => window.removeEventListener('gmp-quota-exceeded', onQuotaExceeded);
   }, []);
+
+  // Track real-time trip duration during 'in_trip' so >20% duration overrun alert triggers accurately
+  useEffect(() => {
+    if (phase !== 'in_trip' || !activeOffer) {
+      setActiveTripElapsedSeconds(0);
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setActiveTripElapsedSeconds((prev) => prev + 1);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [phase, activeOffer?.id]);
+
+  // Real-time GPS tracking loop during active trips (syncs Driver Cockpit + Customer Live Tracker)
+  useEffect(() => {
+    const isActiveTripPhase =
+      phase === 'en_route_pickup' || phase === 'arrived_pickup' || phase === 'in_trip';
+    if (!isActiveTripPhase || !activeOffer) {
+      if (phase === 'completed' && activeOffer) {
+        const district =
+          KARNATAKA_31_DISTRICTS.find((d) => d.id === preferences.selectedDistrictId) ??
+          KARNATAKA_31_DISTRICTS[0];
+        const endpoints = resolveOfferGeoEndpoints(activeOffer, {
+          lat: district.lat,
+          lng: district.lng,
+        });
+        setDriverLivePosition(endpoints.dropoff);
+      } else {
+        setDriverLivePosition(null);
+      }
+      return;
+    }
+
+    const district =
+      KARNATAKA_31_DISTRICTS.find((d) => d.id === preferences.selectedDistrictId) ??
+      KARNATAKA_31_DISTRICTS[0];
+    const endpoints = resolveOfferGeoEndpoints(activeOffer, {
+      lat: district.lat,
+      lng: district.lng,
+    });
+    const linkedRideId = activeOffer.linkedRideId;
+
+    const pushPosition = (pos: GeoPoint) => {
+      setDriverLivePosition(pos);
+      if (linkedRideId) {
+        void firebase.updateLiveRideStatus(linkedRideId, {
+          driverLat: pos.lat,
+          driverLng: pos.lng,
+        });
+      }
+    };
+
+    if (
+      liveTrackingSource === 'device_gps' &&
+      typeof navigator !== 'undefined' &&
+      'geolocation' in navigator
+    ) {
+      const initialPos = interpolateLiveTrackingPosition(
+        endpoints.pickup,
+        endpoints.dropoff,
+        0.15,
+        phase
+      );
+      setDriverLivePosition(initialPos);
+      const watchId = navigator.geolocation.watchPosition(
+        (position) => {
+          pushPosition({
+            lat: Number(position.coords.latitude.toFixed(5)),
+            lng: Number(position.coords.longitude.toFixed(5)),
+          });
+        },
+        () => {
+          setLiveTrackingSource('corridor_sim');
+          setToastMessage('Device GPS permission unavailable — switched to Corridor Live Sync.');
+        },
+        { enableHighAccuracy: true, maximumAge: 3000, timeout: 8000 }
+      );
+      return () => navigator.geolocation.clearWatch(watchId);
+    }
+
+    let stepRatio = phase === 'in_trip' ? 0.14 : 0.18;
+    const startPos = interpolateLiveTrackingPosition(
+      endpoints.pickup,
+      endpoints.dropoff,
+      stepRatio,
+      phase
+    );
+    pushPosition(startPos);
+
+    if (phase === 'arrived_pickup') {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      stepRatio = Math.min(0.94, stepRatio + 0.06);
+      const nextPos = interpolateLiveTrackingPosition(
+        endpoints.pickup,
+        endpoints.dropoff,
+        stepRatio,
+        phase
+      );
+      pushPosition(nextPos);
+    }, 2000);
+
+    return () => window.clearInterval(intervalId);
+  }, [phase, activeOffer?.id, activeOffer?.linkedRideId, liveTrackingSource, preferences.selectedDistrictId]);
 
   useEffect(() => {
     try {
@@ -390,6 +505,47 @@ function AureliaWorkspace() {
     setToastMessage(
       `Dispatched ${summary.distanceKm} km route (${tierLabel}) · ₹${rateUsed.toFixed(1)}/km.`
     );
+  };
+
+  const handleStartDemoCalibrationRide = () => {
+    const tier = preferences.selectedVehicleTier;
+    const tierLabel = getVehicleTierLabel(tier);
+    const demoOffer: RideOffer = {
+      id: `demo-calibration-${Date.now()}`,
+      category: 'standard',
+      vehicleTier: tier,
+      isEmergencyHospitalVisit: false,
+      pricingModel: 'per_km_19',
+      serviceLabel: `Company Demo Ride · ${tierLabel}`,
+      riderName: 'Company Telemetry Calibration (3 km)',
+      riderRating: 5.0,
+      pickupAddress: 'Vidhana Soudha, Bengaluru Urban',
+      dropoffAddress: 'MG Road Metro Station, Bengaluru',
+      pickupCoords: { x: 50, y: 65 },
+      dropoffCoords: { x: 58, y: 70 },
+      pickupLatLng: { lat: 12.9791, lng: 77.5913 },
+      dropoffLatLng: { lat: 12.9756, lng: 77.6066 },
+      pickupEtaMins: 2,
+      tripDurationMins: 8,
+      distanceMiles: 3.0,
+      baseFare: 57,
+      surgeMultiplier: 1.0,
+      careStipend: 0,
+      estimatedTip: 0,
+      accessibilityNotes: 'Mandatory Company Free Demo Ride for 3.0 km telemetry calibration. Revenue ₹57 credited to driver.',
+      equipmentRequired: [`${tierLabel} Certified`],
+      graceWaitMins: 5,
+      checklist: [
+        { id: 'demo-chk-1', label: 'Verify GPS fix & road telemetry calibration', checked: true },
+        { id: 'demo-chk-2', label: 'Confirm ₹19/km meter rate & safety limits', checked: true },
+      ],
+    };
+
+    setActiveOffer(demoOffer);
+    setActiveCareAptId(null);
+    setPhase('in_trip');
+    setActiveTripElapsedSeconds(0);
+    setToastMessage('Started Free Company Demo Calibration Ride (3.0 km) · Vidhana Soudha to MG Road.');
   };
 
   const handleAcceptOffer = () => {
@@ -677,6 +833,8 @@ function AureliaWorkspace() {
             </nav>
 
             <div className="flex items-center gap-2">
+              <PWAInstallButton />
+
               <button
                 type="button"
                 onClick={() => setChatbotOpen(true)}
@@ -769,7 +927,11 @@ function AureliaWorkspace() {
             </div>
 
             <div className="hidden sm:flex items-center gap-2 text-[11px] font-mono-tabular text-stone-500 dark:text-stone-400 shrink-0">
-              <span>{firebase.user ? `Firebase: ${firebase.user.email}` : 'Local Sandbox Ready'}</span>
+              <span>
+                {firebase.user
+                  ? `Firebase: ${firebase.user.email || firebase.user.phoneNumber || firebase.user.uid.slice(0, 8)}`
+                  : 'Local Sandbox Ready'}
+              </span>
               <span aria-hidden="true">·</span>
               <span>{incomingCustomerRides.length} Live Requests</span>
             </div>
@@ -800,6 +962,9 @@ function AureliaWorkspace() {
               activeCondition={preferences.activeFareCondition ?? 'off_peak_corridor'}
               liveRides={firebase.liveRides}
               currentUserUid={firebase.user?.uid}
+              verifiedPhoneNumber={firebase.verifiedPhoneNumber}
+              onSendFirebasePhoneOtp={firebase.sendPhoneOtpViaFirebase}
+              onVerifyFirebasePhoneOtp={firebase.verifyPhoneOtpViaFirebase}
               onChangeCondition={(cond) => updatePreferences({ activeFareCondition: cond })}
               onCreateRide={firebase.createLiveRideOrder}
               onUpdateRideStatus={firebase.updateLiveRideStatus}
@@ -858,6 +1023,20 @@ function AureliaWorkspace() {
                   preferences={preferences}
                   plannedRoute={plannedRoute}
                   plannedRouteObj={plannedRouteObj}
+                  driverLivePosition={driverLivePosition}
+                  liveTrackingSource={liveTrackingSource}
+                  elapsedTripSeconds={activeTripElapsedSeconds}
+                  onToggleLiveTrackingSource={() =>
+                    setLiveTrackingSource((prev) =>
+                      prev === 'device_gps' ? 'corridor_sim' : 'device_gps'
+                    )
+                  }
+                  onNotify={(msg) => setToastMessage(msg)}
+                  onTripDurationOverrunAlert={(warning) =>
+                    setToastMessage(
+                      `Duration Warning (+${warning.overrunPercent}%): Trip exceeded ${warning.estimatedMins}m estimate. Notify rider.`
+                    )
+                  }
                   onToggleOnline={handleToggleOnline}
                   onSimulateOffer={handleSimulateOffer}
                   onAcceptCustomerRide={(ride) => void handleAcceptCustomerRide(ride)}
@@ -875,6 +1054,7 @@ function AureliaWorkspace() {
                   onRouteComputed={handleRouteComputed}
                   onDispatchPlannedRoute={handleDispatchPlannedRoute}
                   onGoToCareHub={() => setActiveTab('care')}
+                  onStartDemoRide={handleStartDemoCalibrationRide}
                 />
               )}
 
@@ -932,10 +1112,13 @@ function AureliaWorkspace() {
                   preferences={preferences}
                   completedTrips={completedTrips}
                   firebaseUser={firebase.user}
+                  verifiedPhoneNumber={firebase.verifiedPhoneNumber}
                   isAdminUser={firebase.isAdminUser}
                   connectionOk={firebase.connectionOk}
                   onSignInGoogle={firebase.signInWithGoogle}
                   onSignOut={firebase.signOutUser}
+                  onSendFirebasePhoneOtp={firebase.sendPhoneOtpViaFirebase}
+                  onVerifyFirebasePhoneOtp={firebase.verifyPhoneOtpViaFirebase}
                   onSaveProfile={(updated) => {
                     setDriverProfile(updated);
                     void firebase.syncDriverAccountToFirestore(updated, preferences);
@@ -995,7 +1178,9 @@ function AureliaWorkspace() {
         {/* Driver Onboarding & Demo Ride Modal */}
         {!onboardingVerified && (
           <DriverOnboardingModal
+            verifiedPhoneNumber={firebase.verifiedPhoneNumber}
             onSendFirebasePhoneOtp={firebase.sendPhoneOtpViaFirebase}
+            onVerifyFirebasePhoneOtp={firebase.verifyPhoneOtpViaFirebase}
             onSwitchPortal={(target) => {
               setPortalMode(target);
               setOnboardingVerified(true);
@@ -1019,6 +1204,9 @@ function AureliaWorkspace() {
 
         {/* Aurelia Driving Game Modal */}
         <AureliaDrivingGameModal isOpen={gameOpen} onClose={() => setGameOpen(false)} />
+
+        {/* Offline Connectivity Indicator */}
+        <OfflineIndicator />
       </div>
     </GoogleMapsSdkProvider>
   );

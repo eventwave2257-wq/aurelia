@@ -39,6 +39,7 @@ interface DispatchMapProps {
   plannedRouteObj: google.maps.routes.Route | null;
   careAppointments: CareAppointment[];
   selectedDistrictId: string;
+  driverLivePosition?: GeoPoint | null;
   onSelectDistrict: (district: KarnatakaDistrict) => void;
   onSelectCarePin?: (appointmentId: string) => void;
 }
@@ -221,6 +222,7 @@ export function DispatchMap({
   plannedRouteObj,
   careAppointments,
   selectedDistrictId,
+  driverLivePosition = null,
   onSelectDistrict,
   onSelectCarePin,
 }: DispatchMapProps) {
@@ -356,6 +358,23 @@ export function DispatchMap({
                 <Pin background="#10B981" borderColor="#064E3B" glyphColor="#FFFFFF" />
               </AdvancedMarker>
             )}
+
+            {/* Live Moving Chauffeur GPS Marker during Active Trip */}
+            {driverLivePosition &&
+              (phase === 'en_route_pickup' || phase === 'arrived_pickup' || phase === 'in_trip') && (
+                <AdvancedMarker
+                  position={driverLivePosition}
+                  title={`Live Chauffeur GPS (${driverLivePosition.lat.toFixed(4)}, ${driverLivePosition.lng.toFixed(4)})`}
+                >
+                  <div
+                    data-testid="dispatch-map-live-driver-marker"
+                    className="w-7 h-7 rounded-full bg-[#0B0D12] border-2 border-[#E6C77E] shadow-lg flex items-center justify-center"
+                  >
+                    <span className="w-3 h-3 rounded-full bg-emerald-400 animate-ping absolute" />
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 relative" />
+                  </div>
+                </AdvancedMarker>
+              )}
           </GoogleMap>
         ) : (
           /* Interactive Karnataka Corridor Map (Built-in 31-District Telemetry & Routing) */
@@ -561,37 +580,44 @@ export function DispatchMap({
                   const oy = ((18.5 - originLatLng.lat) / 7.0) * 84 + 8;
                   const dx = ((dropLatLng.lng - 74.0) / 4.6) * 65 + 16;
                   const dy = ((18.5 - dropLatLng.lat) / 7.0) * 84 + 8;
-                  const ratio =
-                    phase === 'completed'
-                      ? 1
-                      : phase === 'in_trip'
-                        ? 0.65
-                        : phase === 'arrived_pickup'
-                          ? 0.15
-                          : phase === 'en_route_pickup'
-                            ? 0.05
-                            : 0;
-                  const vx = ox + (dx - ox) * ratio;
-                  const vy = oy + (dy - oy) * ratio;
-                  return (
-                    <g>
-                      <line
-                        x1={ox}
-                        y1={oy}
-                        x2={dx}
-                        y2={dy}
-                        stroke={routeStroke}
-                        strokeWidth="1.2"
-                        strokeDasharray="2 1.2"
-                      />
-                      <circle cx={ox} cy={oy} r={2.2} fill="#E6C77E" stroke="#0B0D12" strokeWidth="0.5" />
-                      <circle cx={dx} cy={dy} r={2.2} fill="#10B981" stroke="#FFFFFF" strokeWidth="0.5" />
-                      {ratio > 0 && (
-                        <circle cx={vx} cy={vy} r={2.6} fill="#FFFFFF" stroke={routeStroke} strokeWidth="0.9" />
-                      )}
-                    </g>
-                  );
-                })()}
+                    const ratio =
+                      phase === 'completed'
+                        ? 1
+                        : phase === 'in_trip'
+                          ? 0.65
+                          : phase === 'arrived_pickup'
+                            ? 0.15
+                            : phase === 'en_route_pickup'
+                              ? 0.05
+                              : 0;
+                    const vx = driverLivePosition
+                      ? ((driverLivePosition.lng - 74.0) / 4.6) * 65 + 16
+                      : ox + (dx - ox) * ratio;
+                    const vy = driverLivePosition
+                      ? ((18.5 - driverLivePosition.lat) / 7.0) * 84 + 8
+                      : oy + (dy - oy) * ratio;
+                    return (
+                      <g>
+                        <line
+                          x1={ox}
+                          y1={oy}
+                          x2={dx}
+                          y2={dy}
+                          stroke={routeStroke}
+                          strokeWidth="1.2"
+                          strokeDasharray="2 1.2"
+                        />
+                        <circle cx={ox} cy={oy} r={2.2} fill="#E6C77E" stroke="#0B0D12" strokeWidth="0.5" />
+                        <circle cx={dx} cy={dy} r={2.2} fill="#10B981" stroke="#FFFFFF" strokeWidth="0.5" />
+                        {(ratio > 0 || Boolean(driverLivePosition)) && (
+                          <g data-testid="dispatch-map-live-driver-marker">
+                            <circle cx={vx} cy={vy} r={4.2} fill="rgba(16,185,129,0.28)" />
+                            <circle cx={vx} cy={vy} r={2.4} fill="#FFFFFF" stroke="#10B981" strokeWidth="0.9" />
+                          </g>
+                        )}
+                      </g>
+                    );
+                  })()}
               </svg>
             </div>
           </div>
@@ -605,9 +631,15 @@ export function DispatchMap({
               {phase === 'offline' && `${selectedDistrict.name} · Offline`}
               {phase === 'online_idle' && `${selectedDistrict.name} · Online`}
               {phase === 'request_incoming' && 'Incoming Dispatch Route'}
-              {phase === 'en_route_pickup' && `Pickup ETA · ${activeOffer?.pickupEtaMins ?? 4} min`}
-              {phase === 'arrived_pickup' && 'At Pickup Portico'}
-              {phase === 'in_trip' && `En Route · ${activeOffer?.tripDurationMins ?? 24} min`}
+              {phase === 'en_route_pickup' &&
+                `Pickup ETA · ${activeOffer?.pickupEtaMins ?? 4} min${
+                  driverLivePosition ? ` · Live ${driverLivePosition.lat.toFixed(3)}°N` : ''
+                }`}
+              {phase === 'arrived_pickup' && 'At Pickup Portico · GPS Locked'}
+              {phase === 'in_trip' &&
+                `En Route · ${activeOffer?.tripDurationMins ?? 24} min${
+                  driverLivePosition ? ` · Live ${driverLivePosition.lat.toFixed(3)}°N` : ''
+                }`}
               {phase === 'completed' && 'Trip Completed · Drop-off Reached'}
             </span>
           </div>

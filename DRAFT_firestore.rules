@@ -16,7 +16,10 @@ service cloud.firestore {
     }
 
     function isSignedIn() {
-      return request.auth != null && request.auth.token.email_verified == true;
+      return request.auth != null && (
+        request.auth.token.email_verified == true ||
+        (request.auth.token.phone_number is string && request.auth.token.phone_number.size() >= 8)
+      );
     }
 
     function isOwner(ownerUid) {
@@ -24,7 +27,9 @@ service cloud.firestore {
     }
 
     function isBootstrappedAdmin() {
-      return isSignedIn() && request.auth.token.email == 'eventwave2257@gmail.com';
+      return request.auth != null &&
+        request.auth.token.email_verified == true &&
+        request.auth.token.email == 'eventwave2257@gmail.com';
     }
 
     function isAdmin() {
@@ -157,8 +162,9 @@ service cloud.firestore {
         data.keys().hasOnly([
           'id', 'customerId', 'customerName', 'driverId', 'driverName',
           'pickupLabel', 'dropoffLabel', 'vehicleTier', 'fareCondition',
-          'distanceKm', 'fareInr', 'driverNetInr', 'companyFeeInr',
-          'paymentMethod', 'paymentStatus', 'razorpayOrderId', 'razorpayPaymentId',
+          'distanceKm', 'fareInr', 'driverNetInr', 'companyFeeInr', 'tipInr',
+          'paymentMethod', 'paymentStatus', 'ccavenueOrderId', 'ccavenueTrackingId', 'ccavenueBankRefNo',
+          'razorpayOrderId', 'razorpayPaymentId',
           'driverLat', 'driverLng', 'status', 'createdAt', 'updatedAt'
         ]) &&
         data.id == rideId &&
@@ -174,8 +180,12 @@ service cloud.firestore {
         data.fareInr is number && data.fareInr >= 0 && data.fareInr <= 200000 &&
         (!data.keys().hasAny(['driverNetInr']) || (data.driverNetInr is number && data.driverNetInr >= 0 && data.driverNetInr <= 200000)) &&
         (!data.keys().hasAny(['companyFeeInr']) || (data.companyFeeInr is number && data.companyFeeInr >= 0 && data.companyFeeInr <= 50000)) &&
-        data.paymentMethod in ['razorpay_upi', 'razorpay_card', 'cash'] &&
+        (!data.keys().hasAny(['tipInr']) || (data.tipInr is number && data.tipInr >= 0 && data.tipInr <= 5000)) &&
+        data.paymentMethod in ['ccavenue_upi', 'ccavenue_card', 'ccavenue_netbanking', 'razorpay_upi', 'razorpay_card', 'cash'] &&
         data.paymentStatus in ['pending', 'paid', 'refunded'] &&
+        (!data.keys().hasAny(['ccavenueOrderId']) || (data.ccavenueOrderId is string && data.ccavenueOrderId.size() <= 100)) &&
+        (!data.keys().hasAny(['ccavenueTrackingId']) || (data.ccavenueTrackingId is string && data.ccavenueTrackingId.size() <= 100)) &&
+        (!data.keys().hasAny(['ccavenueBankRefNo']) || (data.ccavenueBankRefNo is string && data.ccavenueBankRefNo.size() <= 100)) &&
         (!data.keys().hasAny(['razorpayOrderId']) || (data.razorpayOrderId is string && data.razorpayOrderId.size() <= 100)) &&
         (!data.keys().hasAny(['razorpayPaymentId']) || (data.razorpayPaymentId is string && data.razorpayPaymentId.size() <= 100)) &&
         (!data.keys().hasAny(['driverLat']) || (data.driverLat is number && data.driverLat >= -90 && data.driverLat <= 90)) &&
@@ -329,16 +339,19 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         (
           isAdmin() ||
-          // Customer cancels or pays via Razorpay
+          // Customer cancels, pays via CCAvenue, or adds an in-trip tip
           (existing().customerId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly([
-            'status', 'paymentStatus', 'razorpayPaymentId', 'updatedAt'
+            'status', 'paymentStatus', 'ccavenueTrackingId', 'ccavenueBankRefNo', 'updatedAt'
           ])) ||
-          // Driver claims a searching ride or updates GPS coordinates & trip stage
+          (existing().customerId == request.auth.uid && existing().status == 'in_trip' && incoming().diff(existing()).affectedKeys().hasOnly([
+            'tipInr', 'updatedAt'
+          ])) ||
+          // Driver claims a searching ride or updates GPS coordinates, tip, & trip stage
           (existing().status == 'searching' && incoming().driverId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly([
             'driverId', 'driverName', 'driverLat', 'driverLng', 'status', 'updatedAt'
           ])) ||
           (existing().driverId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly([
-            'driverLat', 'driverLng', 'status', 'paymentStatus', 'updatedAt'
+            'driverLat', 'driverLng', 'status', 'paymentStatus', 'tipInr', 'updatedAt'
           ]))
         );
       allow delete: if isAdmin() && isValidId(rideId);

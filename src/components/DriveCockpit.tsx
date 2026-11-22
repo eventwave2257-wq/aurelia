@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Accessibility,
+  AlertTriangle,
   ArrowRight,
   Check,
   CheckCircle2,
@@ -10,6 +11,7 @@ import {
   Navigation,
   PhoneCall,
   Power,
+  Radio,
   RotateCcw,
   Search,
   ShieldAlert,
@@ -26,10 +28,13 @@ import type {
   CareAppointment,
   DriverPreferences,
   DriverTripPhase,
+  GeoPoint,
   KarnatakaDistrict,
   LiveRideOrder,
+  LiveTrackingSource,
   PlannedRouteSummary,
   RideOffer,
+  TripDurationWarning,
   VehicleTier,
 } from '../types/aurelia';
 import {
@@ -37,6 +42,8 @@ import {
   calculateOfferEstimatedNet,
   COMPANY_MAINTENANCE_FEE_PER_KM_INR,
   DRIVER_NET_PER_KM_INR,
+  evaluateDistrictTrafficRiskEstimation,
+  evaluateTripDurationWarning,
   evaluateWinWinConditionFare,
   formatCurrency,
   getTripCompletionProgress,
@@ -63,6 +70,12 @@ interface DriveCockpitProps {
   preferences: DriverPreferences;
   plannedRoute: PlannedRouteSummary | null;
   plannedRouteObj: google.maps.routes.Route | null;
+  driverLivePosition?: GeoPoint | null;
+  liveTrackingSource?: LiveTrackingSource;
+  elapsedTripSeconds?: number;
+  onToggleLiveTrackingSource?: () => void;
+  onNotify?: (msg: string) => void;
+  onTripDurationOverrunAlert?: (warning: TripDurationWarning) => void;
   onToggleOnline: () => void;
   onSimulateOffer: (preferredKind?: 'emergency_hospital' | 'care' | 'standard') => void;
   onAcceptCustomerRide?: (ride: LiveRideOrder) => void;
@@ -74,10 +87,10 @@ interface DriveCockpitProps {
   onUpdateTripTip: (tipInr: number) => void;
   onToggleChecklistItem: (itemId: string) => void;
   onUpdatePreferences: (partial: Partial<DriverPreferences>) => void;
-  onSelectDistrict: (district: KarnatakaDistrict) => void;
   onRouteComputed: (summary: PlannedRouteSummary, routeObj: google.maps.routes.Route | null) => void;
   onDispatchPlannedRoute: (summary: PlannedRouteSummary) => void;
   onGoToCareHub: () => void;
+  onStartDemoRide?: () => void;
 }
 
 export function DriveCockpit({
@@ -88,6 +101,12 @@ export function DriveCockpit({
   preferences,
   plannedRoute,
   plannedRouteObj,
+  driverLivePosition = null,
+  liveTrackingSource = 'corridor_sim',
+  elapsedTripSeconds = 0,
+  onToggleLiveTrackingSource,
+  onNotify,
+  onTripDurationOverrunAlert,
   onToggleOnline,
   onSimulateOffer,
   onAcceptCustomerRide,
@@ -103,6 +122,7 @@ export function DriveCockpit({
   onRouteComputed,
   onDispatchPlannedRoute,
   onGoToCareHub,
+  onStartDemoRide,
 }: DriveCockpitProps) {
   const [countdown, setCountdown] = useState<number>(18);
   const [showRadarPanel, setShowRadarPanel] = useState<boolean>(false);
@@ -110,6 +130,9 @@ export function DriveCockpit({
   const [showSafetyDrawer, setShowSafetyDrawer] = useState<boolean>(false);
   const [showSearchModal, setShowSearchModal] = useState<boolean>(false);
   const [graceSecondsElapsed, setGraceSecondsElapsed] = useState<number>(0);
+  const alertedOverrunOfferRef = useRef<string | null>(null);
+  const onOverrunAlertRef = useRef(onTripDurationOverrunAlert);
+  onOverrunAlertRef.current = onTripDurationOverrunAlert;
 
   const activeFareEval = evaluateWinWinConditionFare({
     vehicleMode: preferences.selectedVehicleTier,
@@ -195,6 +218,35 @@ export function DriveCockpit({
         lng: activeDistrictObj.lng,
       })
     : null;
+  const trafficRiskEstimation = useMemo(() => {
+    if (!activeOffer) return null;
+    return evaluateDistrictTrafficRiskEstimation(
+      activeDistrictName,
+      activeOffer.distanceMiles,
+      activeOffer.tripDurationMins
+    );
+  }, [activeOffer, activeDistrictName]);
+
+  const durationWarning = evaluateTripDurationWarning(
+    elapsedTripSeconds,
+    activeOffer?.tripDurationMins ?? 18
+  );
+  const isLiveTrackingActive =
+    phase === 'en_route_pickup' || phase === 'arrived_pickup' || phase === 'in_trip';
+
+  useEffect(() => {
+    if (phase !== 'in_trip' || !activeOffer) {
+      if (phase !== 'in_trip') {
+        alertedOverrunOfferRef.current = null;
+      }
+      return;
+    }
+    if (durationWarning.isExceeded && alertedOverrunOfferRef.current !== activeOffer.id) {
+      alertedOverrunOfferRef.current = activeOffer.id;
+      onOverrunAlertRef.current?.(durationWarning);
+    }
+  }, [phase, activeOffer, durationWarning]);
+
   const fleetBackdropImg =
     preferences.emergencyHospitalFirst || preferences.selectedVehicleTier === 'car_elite'
       ? CARE_MOBILITY_IMG_PATH
@@ -398,6 +450,7 @@ export function DriveCockpit({
             plannedRouteObj={plannedRouteObj}
             careAppointments={careAppointments}
             selectedDistrictId={preferences.selectedDistrictId}
+            driverLivePosition={driverLivePosition}
             onSelectDistrict={onSelectDistrict}
             onSelectCarePin={() => onGoToCareHub()}
           />
@@ -590,15 +643,29 @@ export function DriveCockpit({
                   </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={onToggleOnline}
-                  data-testid="go-online-btn"
-                  className="w-full min-h-[54px] rounded-2xl bg-gradient-to-r from-[#B48A3E] to-[#9A722A] dark:from-[#E6C77E] dark:to-[#C59B47] hover:opacity-95 active:scale-[0.99] text-white dark:text-stone-950 font-bold text-base flex items-center justify-center gap-2.5 transition-all shadow-md cursor-pointer"
-                >
-                  <Power className="w-5 h-5" />
-                  <span>Go Online</span>
-                </button>
+                <div className="space-y-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={onToggleOnline}
+                    data-testid="go-online-btn"
+                    className="w-full min-h-[54px] rounded-2xl bg-gradient-to-r from-[#B48A3E] to-[#9A722A] dark:from-[#E6C77E] dark:to-[#C59B47] hover:opacity-95 active:scale-[0.99] text-white dark:text-stone-950 font-bold text-base flex items-center justify-center gap-2.5 transition-all shadow-md cursor-pointer"
+                  >
+                    <Power className="w-5 h-5" />
+                    <span>Go Online</span>
+                  </button>
+
+                  {onStartDemoRide && (
+                    <button
+                      type="button"
+                      data-testid="start-cockpit-demo-ride-btn"
+                      onClick={onStartDemoRide}
+                      className="w-full min-h-[46px] rounded-2xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-400/40 dark:border-[#E6C77E]/40 text-[#9A722A] dark:text-[#E6C77E] font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition-all cursor-pointer"
+                    >
+                      <Sparkles className="w-4 h-4 text-[#D4AF63]" />
+                      <span>Run Free Company Demo Ride (3 km Calibration)</span>
+                    </button>
+                  )}
+                </div>
               </>
             )}
 
@@ -689,14 +756,28 @@ export function DriveCockpit({
                   </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={onToggleOnline}
-                  className="w-full min-h-[48px] rounded-2xl border border-stone-300 dark:border-white/15 text-stone-800 dark:text-stone-200 hover:bg-stone-100 dark:hover:bg-white/[0.06] font-semibold text-sm flex items-center justify-center gap-2 transition-colors"
-                >
-                  <Power className="w-4 h-4" />
-                  <span>Go Offline</span>
-                </button>
+                <div className="space-y-2 pt-1">
+                  {onStartDemoRide && (
+                    <button
+                      type="button"
+                      data-testid="start-cockpit-demo-ride-idle-btn"
+                      onClick={onStartDemoRide}
+                      className="w-full min-h-[44px] rounded-2xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-400/40 dark:border-[#E6C77E]/40 text-[#9A722A] dark:text-[#E6C77E] font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer"
+                    >
+                      <Sparkles className="w-4 h-4 text-[#D4AF63]" />
+                      <span>Run Free Company Demo Ride (3 km Calibration)</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={onToggleOnline}
+                    className="w-full min-h-[48px] rounded-2xl border border-stone-300 dark:border-white/15 text-stone-800 dark:text-stone-200 hover:bg-stone-100 dark:hover:bg-white/[0.06] font-semibold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <Power className="w-4 h-4" />
+                    <span>Go Offline</span>
+                  </button>
+                </div>
               </>
             )}
 
@@ -806,6 +887,45 @@ export function DriveCockpit({
                       {activeOffer.accessibilityNotes}
                     </p>
                   </div>
+
+                  {/* ML-Based Historical Congestion & High Traffic Risk Prediction Check */}
+                  {trafficRiskEstimation && (
+                    <div
+                      data-testid="traffic-risk-estimation-card"
+                      className={`p-3.5 rounded-2xl border space-y-2 ${
+                        trafficRiskEstimation.isHighRisk
+                          ? 'bg-amber-500/10 dark:bg-amber-950/40 border-amber-400/60 text-amber-950 dark:text-amber-200'
+                          : 'bg-emerald-500/10 dark:bg-emerald-950/30 border-emerald-500/40 text-emerald-900 dark:text-emerald-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <AlertTriangle
+                            className={`w-4 h-4 shrink-0 ${
+                              trafficRiskEstimation.isHighRisk
+                                ? 'text-amber-600 dark:text-amber-400'
+                                : 'text-emerald-600 dark:text-emerald-400'
+                            }`}
+                          />
+                          <span className="text-xs font-bold truncate">
+                            {trafficRiskEstimation.riskLabel}
+                          </span>
+                        </div>
+                        <span
+                          className={`px-2 py-0.5 rounded-lg text-[10px] font-mono-tabular font-bold shrink-0 ${
+                            trafficRiskEstimation.isHighRisk
+                              ? 'bg-amber-600 text-white'
+                              : 'bg-emerald-600 text-white'
+                          }`}
+                        >
+                          {trafficRiskEstimation.congestionIndex}x Congestion
+                        </span>
+                      </div>
+                      <p className="text-[11px] leading-snug opacity-90">
+                        {trafficRiskEstimation.recommendation}
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-3 gap-3">
@@ -963,7 +1083,93 @@ export function DriveCockpit({
                     <p className="text-[11px] text-stone-600 dark:text-stone-300 leading-snug">
                       {tripProgress.subtitle}
                     </p>
+
+                    {/* Live GPS Tracking Telemetry + Trip Duration Timer Strip */}
+                    {isLiveTrackingActive && (
+                      <div className="pt-2 border-t border-stone-200/70 dark:border-white/10 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                        <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 font-semibold">
+                          <Radio className="w-3.5 h-3.5 animate-pulse shrink-0" />
+                          <span data-testid="driver-live-gps-status">
+                            Live Tracking ({liveTrackingSource === 'device_gps' ? 'Device GPS' : 'Corridor Sync'})
+                          </span>
+                          {driverLivePosition && (
+                            <span className="font-mono-tabular text-stone-500 dark:text-stone-400">
+                              · {driverLivePosition.lat.toFixed(4)}°N, {driverLivePosition.lng.toFixed(4)}°E
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          {phase === 'in_trip' && (
+                            <span
+                              data-testid="trip-elapsed-vs-estimate"
+                              className={`font-mono-tabular font-bold ${
+                                durationWarning.isExceeded
+                                  ? 'text-rose-600 dark:text-rose-400'
+                                  : 'text-stone-700 dark:text-stone-200'
+                              }`}
+                            >
+                              {durationWarning.elapsedFormatted} / Est {activeOffer.tripDurationMins}m (+20% @ {durationWarning.thresholdMins}m)
+                            </span>
+                          )}
+                          {onToggleLiveTrackingSource && (
+                            <button
+                              type="button"
+                              data-testid="toggle-gps-source-btn"
+                              onClick={onToggleLiveTrackingSource}
+                              className="px-2 py-1 rounded-lg border border-stone-300 dark:border-white/15 bg-white dark:bg-white/5 text-[10px] font-semibold text-stone-700 dark:text-stone-200 hover:bg-stone-100 dark:hover:bg-white/10 cursor-pointer"
+                            >
+                              {liveTrackingSource === 'device_gps' ? 'Use Corridor' : 'Use Device GPS'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </section>
+
+                  {/* >20% Trip Duration Overrun Warning Notification */}
+                  {phase === 'in_trip' && durationWarning.isExceeded && (
+                    <div
+                      role="alert"
+                      data-testid="trip-duration-overrun-warning"
+                      className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/50 border border-amber-400 dark:border-amber-500/70 space-y-2 shadow-sm"
+                    >
+                      <div className="flex items-start justify-between gap-2.5">
+                        <div className="flex items-start gap-2.5 min-w-0">
+                          <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                          <div className="min-w-0">
+                            <p className="text-xs font-bold text-amber-950 dark:text-amber-200">
+                              {durationWarning.title}
+                            </p>
+                            <p className="text-[11px] text-amber-900/90 dark:text-amber-100/90 leading-snug mt-0.5">
+                              {durationWarning.message}
+                            </p>
+                          </div>
+                        </div>
+                        <span className="px-2 py-0.5 rounded-lg bg-amber-600 text-white text-[10px] font-mono-tabular font-bold shrink-0">
+                          +{durationWarning.overrunPercent}%
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-1">
+                        <span className="text-[10px] font-mono-tabular text-amber-800 dark:text-amber-300">
+                          Elapsed: {durationWarning.elapsedFormatted} vs Est: {durationWarning.estimatedFormatted}
+                        </span>
+                        <button
+                          type="button"
+                          data-testid="send-eta-expectation-btn"
+                          onClick={() =>
+                            onNotify?.(
+                              `Updated ETA advisory (+${durationWarning.overrunMinutes} min) sent to ${activeOffer.riderName}.`
+                            )
+                          }
+                          className="px-3 py-1.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white text-[11px] font-semibold cursor-pointer"
+                        >
+                          Notify Passenger ETA
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Rider & Route Header */}
                   <div className="flex items-start justify-between gap-3">
@@ -995,9 +1201,11 @@ export function DriveCockpit({
                     </div>
                   </div>
 
-                  {/* Static Google Maps SDK Route Visualization (Pickup → Dropoff) */}
+                  {/* Live Google Maps SDK Route Visualization (Pickup -> Dropoff + Moving Driver Pin) */}
                   {activeOfferEndpoints && (
                     <ActiveTripMiniMap
+                      mapIdSuffix="driver"
+                      viewerRole="driver"
                       pickupLatLng={activeOfferEndpoints.pickup}
                       dropoffLatLng={activeOfferEndpoints.dropoff}
                       pickupLabel={activeOffer.pickupAddress}
@@ -1007,6 +1215,8 @@ export function DriveCockpit({
                       distanceKm={activeOffer.distanceMiles}
                       durationMins={activeOffer.tripDurationMins}
                       phase={phase}
+                      driverLatLng={driverLivePosition}
+                      isLiveTracking={isLiveTrackingActive}
                     />
                   )}
 

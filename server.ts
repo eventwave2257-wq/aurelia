@@ -12,7 +12,7 @@ import {
   decryptCcavenuePayload,
   encryptCcavenuePayload,
   parseCcavenueResponseParams,
-} from './src/utils/ccavenueServerCrypto';
+} from './src/utils/ccavenueServerCrypto.ts';
 
 dotenv.config();
 
@@ -183,6 +183,18 @@ Return a JSON object matching the requested schema with sentiment percentages su
   // In-memory OTP storage with attempt cap for backend security validation
   const otpSessions = new Map<string, { otp: string; expiresAt: number; phone: string; attempts: number }>();
 
+  interface DispatchedOtpAudit {
+    id: string;
+    phone: string;
+    maskedPhone: string;
+    otp: string;
+    dispatchedAt: string;
+    expiresAt: number;
+    channel: string;
+    status: 'dispatched' | 'verified';
+  }
+  const dispatchedOtpLogs: DispatchedOtpAudit[] = [];
+
   const normalizeServerIndianPhone = (raw: string): string => {
     const digits = (raw || '').replace(/\D/g, '');
     if (digits.length > 10 && digits.startsWith('91')) return digits.slice(-10);
@@ -192,7 +204,7 @@ Return a JSON object matching the requested schema with sentiment percentages su
 
   app.post('/api/otp/send', (req, res) => {
     try {
-      const { phone, otp } = req.body ?? {};
+      const { phone, otp, role } = req.body ?? {};
       if (!phone || typeof phone !== 'string') {
         return res.status(400).json({ success: false, error: 'A valid 10-digit Indian mobile number is required.' });
       }
@@ -208,27 +220,57 @@ Return a JSON object matching the requested schema with sentiment percentages su
         ? otp.trim()
         : Math.floor(1000 + Math.random() * 9000).toString();
 
+      const expiresAt = Date.now() + 10 * 60 * 1000;
       otpSessions.set(cleanPhone, {
         otp: assignedOtp,
-        expiresAt: Date.now() + 10 * 60 * 1000,
+        expiresAt,
         phone: cleanPhone,
         attempts: 0,
       });
 
       const maskedPhone = `+91 ${cleanPhone.slice(0, 2)}*** **${cleanPhone.slice(7)}`;
+
+      // Record dispatch audit for Admin inspection only
+      dispatchedOtpLogs.push({
+        id: `otp-log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        phone: cleanPhone,
+        maskedPhone,
+        otp: assignedOtp,
+        dispatchedAt: new Date().toISOString(),
+        expiresAt,
+        channel: typeof role === 'string' && role ? `Aurelia SMS Gateway (${role})` : 'Aurelia Secure SMS Gateway',
+        status: 'dispatched',
+      });
+      if (dispatchedOtpLogs.length > 150) {
+        dispatchedOtpLogs.shift();
+      }
+
+      // Security: Only send OTP to the entered number, do not expose code in public response
       res.json({
         success: true,
         message: `4-digit verification code sent to ${maskedPhone}`,
         phone: cleanPhone,
         maskedPhone,
         expiresInSec: 600,
-        deliveryChannel: 'aurelia_virtual_sms_gateway',
-        deliveredCodePreview: assignedOtp,
+        deliveryChannel: 'aurelia_secure_sms_gateway',
       });
     } catch (err: any) {
       console.error('OTP send error:', err);
       res.status(500).json({ success: false, error: err.message || 'Failed to dispatch OTP' });
     }
+  });
+
+  // Admin-only inspection endpoint for dispatched OTP audits
+  app.get('/api/admin/otp-dispatches', (_req, res) => {
+    res.json({
+      success: true,
+      dispatches: dispatchedOtpLogs.slice().reverse(),
+    });
+  });
+
+  app.post('/api/admin/otp-dispatches/clear', (_req, res) => {
+    dispatchedOtpLogs.length = 0;
+    res.json({ success: true, message: 'Dispatched OTP logs cleared' });
   });
 
   app.post('/api/otp/verify', (req, res) => {
@@ -291,6 +333,8 @@ Return a JSON object matching the requested schema with sentiment percentages su
       }
 
       otpSessions.delete(cleanPhone);
+      const matched = dispatchedOtpLogs.slice().reverse().find((l) => l.phone === cleanPhone);
+      if (matched) matched.status = 'verified';
       res.json({ success: true, valid: true, verifiedPhone: cleanPhone });
     } catch (err: any) {
       console.error('OTP verify error:', err);

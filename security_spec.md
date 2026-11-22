@@ -2,7 +2,7 @@
 
 ## 1. Data Invariants
 1. **Master Catch-All Deny**: Every path not explicitly matched is denied for all reads and writes.
-2. **Ownership & Verified Identity**: All driver data (`/drivers/{driverId}`) and subcollections require `request.auth != null`, `request.auth.token.email_verified == true`, and `request.auth.uid == driverId`.
+2. **Ownership & Verified Identity**: All driver data (`/drivers/{driverId}`) and subcollections require `request.auth != null`, either verified email (`request.auth.token.email_verified == true`) or verified Firebase Phone OTP (`request.auth.token.phone_number`), and `request.auth.uid == driverId`. Admin privileges strictly require verified email (`eventwave2257@gmail.com`).
 3. **PII Isolation**: Sensitive fields (`email`, `phone`, `licensePlate`, `licenseNumber`) are stored strictly in `/drivers/{driverId}/private/pii` and readable/writable only by `driverId`.
 4. **Master Gate**: Writes to `/trips/{tripId}` and `/appointments/{appointmentId}` verify parent `/drivers/{driverId}` exists and belongs to `request.auth.uid`.
 5. **Immutable & Terminal States**: `uid`, `ownerUid`, and `createdAt` are immutable; completed trips cannot be altered once persisted; completed care appointments cannot transition backward.
@@ -10,7 +10,7 @@
 
 ## 2. Adversarial "Dirty Dozen" Payloads (Expected: PERMISSION_DENIED)
 1. **Unauthenticated Read/Write**: `request.auth == null` on `/drivers/uid1` -> DENIED.
-2. **Unverified Email**: `request.auth.token.email_verified == false` on `/drivers/uid1` -> DENIED.
+2. **Unverified Identity**: `request.auth.token.email_verified == false` without `phone_number` on `/drivers/uid1` -> DENIED.
 3. **Cross-User Ownership Spoof**: Signed in as `uid1`, create `/drivers/uid2` with `uid: "uid2"` -> DENIED.
 4. **UID Injection in Payload**: Signed in as `uid1`, create `/drivers/uid1` with `uid: "uid2"` -> DENIED.
 5. **Shadow / Ghost Field Injection**: Create `/drivers/uid1` with extra key `isAdmin: true` -> DENIED (`keys().hasOnly(...)`).

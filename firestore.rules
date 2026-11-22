@@ -16,7 +16,10 @@ service cloud.firestore {
     }
 
     function isSignedIn() {
-      return request.auth != null && request.auth.token.email_verified == true;
+      return request.auth != null && (
+        request.auth.token.email_verified == true ||
+        (request.auth.token.phone_number is string && request.auth.token.phone_number.size() >= 8)
+      );
     }
 
     function isOwner(ownerUid) {
@@ -24,7 +27,9 @@ service cloud.firestore {
     }
 
     function isBootstrappedAdmin() {
-      return isSignedIn() && request.auth.token.email == 'eventwave2257@gmail.com';
+      return request.auth != null &&
+        request.auth.token.email_verified == true &&
+        request.auth.token.email == 'eventwave2257@gmail.com';
     }
 
     function isAdmin() {

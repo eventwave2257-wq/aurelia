@@ -20,6 +20,8 @@ import type {
   InTripPayoutPreview,
   KarnatakaDistrict,
   LiveRideOrder,
+  LiveRideStatus,
+  LiveTrackingMetrics,
   NewCareBookingInput,
   PassengerMultiPointRating,
   PeakWindowMetric,
@@ -33,6 +35,8 @@ import type {
   SpeedViolationEvaluation,
   TripCompletionProgress,
   TripCompletionStep,
+  TripDurationWarning,
+  TrafficRiskEstimation,
   VehicleTier,
   WinWinFareEvaluation,
 } from '../types/aurelia';
@@ -2190,4 +2194,314 @@ export function computeStaticRoutePreviewGeometry(
     dropoffSvg: { x: Math.max(16, Math.min(84, dX)), y: Math.max(18, Math.min(82, dY)) },
   };
 }
+
+export function formatIndianE164Phone(rawPhone: string): string {
+  const clean = normalizeIndianMobile(rawPhone);
+  if (!isValidIndianMobile(clean)) return '';
+  return `+91${clean}`;
+}
+
+export function isVerifiedFirebaseAuthUser(
+  userLike: { emailVerified?: boolean; phoneNumber?: string | null } | null | undefined
+): boolean {
+  if (!userLike) return false;
+  if (userLike.emailVerified === true) return true;
+  if (typeof userLike.phoneNumber === 'string' && userLike.phoneNumber.trim().length >= 8) {
+    return true;
+  }
+  return false;
+}
+
+export function classifyFirebasePhoneAuthError(err: unknown): {
+  code: string;
+  message: string;
+  canFallbackToGateway: boolean;
+  requiresConsoleSetup: boolean;
+} {
+  const rawCode =
+    typeof err === 'object' && err !== null && 'code' in err
+      ? String((err as { code?: unknown }).code ?? '')
+      : '';
+  const rawMsg = err instanceof Error ? err.message : String(err ?? '');
+  const combined = `${rawCode} ${rawMsg}`.toLowerCase();
+
+  if (combined.includes('invalid-verification-code')) {
+    return {
+      code: rawCode || 'auth/invalid-verification-code',
+      message: 'Invalid Firebase OTP code. Please double-check the 6-digit SMS code and try again.',
+      canFallbackToGateway: false,
+      requiresConsoleSetup: false,
+    };
+  }
+  if (combined.includes('code-expired') || combined.includes('session-expired')) {
+    return {
+      code: rawCode || 'auth/code-expired',
+      message: 'Firebase OTP expired. Request a fresh verification code.',
+      canFallbackToGateway: false,
+      requiresConsoleSetup: false,
+    };
+  }
+  if (combined.includes('invalid-phone-number')) {
+    return {
+      code: rawCode || 'auth/invalid-phone-number',
+      message: 'Enter a valid 10-digit +91 Indian mobile number.',
+      canFallbackToGateway: false,
+      requiresConsoleSetup: false,
+    };
+  }
+  if (combined.includes('operation-not-allowed')) {
+    return {
+      code: rawCode || 'auth/operation-not-allowed',
+      message:
+        'Enable Phone Sign-in provider in Firebase Console (Authentication → Sign-in method → Phone).',
+      canFallbackToGateway: true,
+      requiresConsoleSetup: true,
+    };
+  }
+  if (combined.includes('billing-not-enabled')) {
+    return {
+      code: rawCode || 'auth/billing-not-enabled',
+      message:
+        'Firebase real SMS requires Blaze billing or configured Firebase Test Phone Numbers in Console.',
+      canFallbackToGateway: true,
+      requiresConsoleSetup: true,
+    };
+  }
+  if (combined.includes('unauthorized-domain')) {
+    return {
+      code: rawCode || 'auth/unauthorized-domain',
+      message:
+        'Add this app domain to Firebase Console → Authentication → Settings → Authorized domains.',
+      canFallbackToGateway: true,
+      requiresConsoleSetup: true,
+    };
+  }
+  if (combined.includes('provider-already-linked') || combined.includes('credential-already-in-use')) {
+    return {
+      code: rawCode || 'auth/credential-already-in-use',
+      message: 'This phone number is already linked to another Firebase account.',
+      canFallbackToGateway: false,
+      requiresConsoleSetup: false,
+    };
+  }
+  if (combined.includes('too-many-requests') || combined.includes('quota-exceeded')) {
+    return {
+      code: rawCode || 'auth/too-many-requests',
+      message: 'Firebase SMS rate limit reached for this number. Try again shortly or use fallback gateway.',
+      canFallbackToGateway: true,
+      requiresConsoleSetup: false,
+    };
+  }
+  if (combined.includes('captcha') || combined.includes('timed out') || combined.includes('network')) {
+    return {
+      code: rawCode || 'auth/captcha-check-failed',
+      message: 'Firebase reCAPTCHA check unavailable in preview — using Aurelia Secure SMS Gateway.',
+      canFallbackToGateway: true,
+      requiresConsoleSetup: false,
+    };
+  }
+
+  return {
+    code: rawCode || 'auth/phone-auth-unavailable',
+    message: rawMsg || 'Firebase Phone OTP unavailable in current environment.',
+    canFallbackToGateway: true,
+    requiresConsoleSetup: false,
+  };
+}
+
+export function evaluateDistrictTrafficRiskEstimation(
+  districtName: string,
+  distanceKm: number,
+  estimatedDurationMins: number
+): TrafficRiskEstimation {
+  const cleanDistrict = (districtName || 'Bengaluru Urban').toLowerCase();
+  const safeDist = Math.max(1, distanceKm);
+  const safeEstMins = Math.max(5, estimatedDurationMins);
+
+  // Machine Learning heuristic simulation based on historical district congestion weights
+  let baseCongestion = 1.15;
+  let corridorName = 'NH-44 / Outer Ring Corridor';
+
+  if (cleanDistrict.includes('bengaluru urban') || cleanDistrict.includes('bengaluru')) {
+    baseCongestion = 1.42;
+    corridorName = 'Silk Board – Outer Ring Road & Hebbal Expressway';
+  } else if (cleanDistrict.includes('dakshina kannada') || cleanDistrict.includes('mangaluru')) {
+    baseCongestion = 1.28;
+    corridorName = 'NH-66 Coastal Highway & Hampankatta Junction';
+  } else if (cleanDistrict.includes('mysuru')) {
+    baseCongestion = 1.22;
+    corridorName = 'Mysuru Palace – Kuvempunagar Corridor';
+  } else if (cleanDistrict.includes('dharwad') || cleanDistrict.includes('hubballi')) {
+    baseCongestion = 1.25;
+    corridorName = 'Hubballi Vidyanagar & NH-48 Bypass';
+  } else if (cleanDistrict.includes('belagavi')) {
+    baseCongestion = 1.18;
+    corridorName = 'Nehru Nagar & NH-48 Corridor';
+  }
+
+  // Distance and time-of-day feature weighting
+  const distFactor = Math.min(1.25, 1 + safeDist * 0.012);
+  const congestionIndex = Number((baseCongestion * distFactor).toFixed(2));
+  const predictedMins = Math.round(safeEstMins * congestionIndex);
+  const riskScore = Math.min(98, Math.round((congestionIndex - 1.0) * 210));
+  const isHighRisk = riskScore >= 35 || congestionIndex >= 1.30;
+
+  return {
+    isHighRisk,
+    riskScore,
+    congestionIndex,
+    historicalAvgMins: safeEstMins,
+    predictedMins,
+    primaryCorridor: corridorName,
+    riskLabel: isHighRisk ? 'High Traffic Risk (ML Congestion Alert)' : 'Moderate / Clear Flow',
+    recommendation: isHighRisk
+      ? `Historical ML model predicts +${predictedMins - safeEstMins} min delay due to peak bottleneck along ${corridorName}. Consider alternate arterial route or accept with buffer.`
+      : `District traffic flow is stable along ${corridorName}. Standard arrival time expected.`,
+  };
+}
+
+
+export function formatDurationMmSs(seconds: number): string {
+  const safe = Math.max(0, Math.floor(seconds));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+export function evaluateTripDurationWarning(
+  elapsedSeconds: number,
+  estimatedDurationMins: number
+): TripDurationWarning {
+  const safeElapsed = Math.max(0, Math.floor(elapsedSeconds));
+  const safeEstMins = Math.max(1, Math.round(estimatedDurationMins));
+  const estimatedSeconds = safeEstMins * 60;
+  const thresholdSeconds = Math.round(estimatedSeconds * 1.2);
+  const thresholdMins = Number((thresholdSeconds / 60).toFixed(1));
+  const isExceeded = safeElapsed > thresholdSeconds;
+  const overrunSeconds = Math.max(0, safeElapsed - estimatedSeconds);
+  const overrunMinutes = Number((overrunSeconds / 60).toFixed(1));
+  const overrunPercent = estimatedSeconds > 0 ? Math.round((overrunSeconds / estimatedSeconds) * 100) : 0;
+
+  return {
+    isExceeded,
+    elapsedSeconds: safeElapsed,
+    elapsedMins: Number((safeElapsed / 60).toFixed(1)),
+    estimatedMins: safeEstMins,
+    thresholdSeconds,
+    thresholdMins,
+    overrunSeconds,
+    overrunMinutes,
+    overrunPercent,
+    elapsedFormatted: formatDurationMmSs(safeElapsed),
+    estimatedFormatted: formatDurationMmSs(estimatedSeconds),
+    title: isExceeded
+      ? `Trip Duration Exceeded +${overrunPercent}% (+${overrunMinutes} min)`
+      : `On Schedule · Est. ${safeEstMins} min`,
+    message: isExceeded
+      ? `Current trip time (${formatDurationMmSs(safeElapsed)}) has exceeded the original ${safeEstMins} min estimate by more than 20% (+${overrunMinutes} min). Keep the passenger informed of the updated arrival time.`
+      : `Warning triggers automatically if duration exceeds ${thresholdMins} min (+20% threshold).`,
+  };
+}
+
+export function interpolateLiveTrackingPosition(
+  pickup: GeoPoint,
+  dropoff: GeoPoint,
+  progressRatio: number,
+  phase: DriverTripPhase | LiveRideStatus
+): GeoPoint {
+  const t = Math.max(0, Math.min(1, progressRatio));
+
+  if (phase === 'arrived_pickup' || phase === 'arrived') {
+    return { lat: Number(pickup.lat.toFixed(5)), lng: Number(pickup.lng.toFixed(5)) };
+  }
+  if (phase === 'completed') {
+    return { lat: Number(dropoff.lat.toFixed(5)), lng: Number(dropoff.lng.toFixed(5)) };
+  }
+
+  if (phase === 'en_route_pickup' || phase === 'en_route' || phase === 'matched') {
+    const startApproach: GeoPoint = {
+      lat: pickup.lat - 0.0085,
+      lng: pickup.lng - 0.0065,
+    };
+    return {
+      lat: Number((startApproach.lat + (pickup.lat - startApproach.lat) * t).toFixed(5)),
+      lng: Number((startApproach.lng + (pickup.lng - startApproach.lng) * t).toFixed(5)),
+    };
+  }
+
+  // 'in_trip' corridor interpolation pickup -> dropoff
+  return {
+    lat: Number((pickup.lat + (dropoff.lat - pickup.lat) * t).toFixed(5)),
+    lng: Number((pickup.lng + (dropoff.lng - pickup.lng) * t).toFixed(5)),
+  };
+}
+
+export function computeLiveTrackingMetrics(params: {
+  currentPos: GeoPoint;
+  pickup: GeoPoint;
+  dropoff: GeoPoint;
+  phase: DriverTripPhase | LiveRideStatus;
+  plannedDistanceKm?: number;
+}): LiveTrackingMetrics {
+  const { currentPos, pickup, dropoff, phase, plannedDistanceKm } = params;
+  const isPickupPhase =
+    phase === 'en_route_pickup' ||
+    phase === 'arrived_pickup' ||
+    phase === 'en_route' ||
+    phase === 'matched' ||
+    phase === 'arrived' ||
+    phase === 'searching';
+
+  const targetPos = isPickupPhase ? pickup : dropoff;
+  const isAtStop =
+    phase === 'arrived_pickup' || phase === 'arrived' || phase === 'completed';
+
+  const rawRemainingKm = isAtStop
+    ? 0
+    : estimateRoadDistanceKm(currentPos, targetPos);
+  const totalLegKm = isPickupPhase
+    ? Math.max(0.8, estimateRoadDistanceKm({ lat: pickup.lat - 0.0085, lng: pickup.lng - 0.0065 }, pickup))
+    : Math.max(0.8, plannedDistanceKm ?? estimateRoadDistanceKm(pickup, dropoff));
+
+  const remainingKm = isAtStop ? 0 : Math.min(totalLegKm * 1.4, rawRemainingKm);
+  const etaMins = isAtStop ? 0 : Math.max(1, Math.round((remainingKm / 26) * 60));
+
+  const dLat = targetPos.lat - currentPos.lat;
+  const dLng = targetPos.lng - currentPos.lng;
+  const bearingRad = Math.atan2(dLng, dLat);
+  const bearingDeg = Math.round(((bearingRad * 180) / Math.PI + 360) % 360);
+
+  let progressFraction = 0;
+  if (phase === 'completed') {
+    progressFraction = 1;
+  } else if (phase === 'arrived_pickup' || phase === 'arrived') {
+    progressFraction = 0.04;
+  } else if (isPickupPhase) {
+    progressFraction = Math.max(0, Math.min(1, 1 - remainingKm / totalLegKm));
+  } else {
+    const legTotal = Math.max(0.5, estimateRoadDistanceKm(pickup, dropoff));
+    progressFraction = Math.max(0, Math.min(0.99, 1 - rawRemainingKm / legTotal));
+  }
+
+  const phaseLabel =
+    phase === 'completed'
+      ? 'Arrived at Destination'
+      : phase === 'arrived_pickup' || phase === 'arrived'
+        ? 'Driver at Pickup Point'
+        : isPickupPhase
+          ? 'Driver Approaching Pickup'
+          : 'Live En Route to Destination';
+
+  return {
+    currentPos,
+    targetPos,
+    remainingKm: Number(remainingKm.toFixed(1)),
+    etaMins,
+    bearingDeg,
+    progressFraction: Number(progressFraction.toFixed(3)),
+    phaseLabel,
+  };
+}
+
+
 

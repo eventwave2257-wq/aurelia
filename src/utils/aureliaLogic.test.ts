@@ -987,3 +987,132 @@ test('resolveOfferGeoEndpoints and computeStaticRoutePreviewGeometry calculate s
   assert.ok(geom.dropoffSvg.y >= 18 && geom.dropoffSvg.y <= 82);
 });
 
+test('formatIndianE164Phone, isVerifiedFirebaseAuthUser, and classifyFirebasePhoneAuthError handle Firebase Phone OTP cleanly', async () => {
+  const {
+    formatIndianE164Phone,
+    isVerifiedFirebaseAuthUser,
+    classifyFirebasePhoneAuthError,
+  } = await import('./aureliaLogic');
+
+  assert.equal(formatIndianE164Phone('98450 12345'), '+919845012345');
+  assert.equal(formatIndianE164Phone('+91 9945781777'), '+919945781777');
+  assert.equal(formatIndianE164Phone('12345'), '');
+
+  assert.equal(isVerifiedFirebaseAuthUser(null), false);
+  assert.equal(isVerifiedFirebaseAuthUser({ emailVerified: false, phoneNumber: null }), false);
+  assert.equal(isVerifiedFirebaseAuthUser({ emailVerified: true, phoneNumber: null }), true);
+  assert.equal(isVerifiedFirebaseAuthUser({ emailVerified: false, phoneNumber: '+919845012345' }), true);
+
+  const opNotAllowed = classifyFirebasePhoneAuthError({ code: 'auth/operation-not-allowed' });
+  assert.equal(opNotAllowed.canFallbackToGateway, true);
+  assert.equal(opNotAllowed.requiresConsoleSetup, true);
+
+  const invalidOtp = classifyFirebasePhoneAuthError({ code: 'auth/invalid-verification-code' });
+  assert.equal(invalidOtp.canFallbackToGateway, false);
+  assert.equal(invalidOtp.requiresConsoleSetup, false);
+});
+
+test('evaluateTripDurationWarning triggers strictly when elapsed duration exceeds estimated duration by more than 20%', async () => {
+  const { evaluateTripDurationWarning, formatDurationMmSs } = await import('./aureliaLogic');
+
+  assert.equal(formatDurationMmSs(0), '00:00');
+  assert.equal(formatDurationMmSs(65), '01:05');
+  assert.equal(formatDurationMmSs(1200), '20:00');
+
+  // 10 min estimated = 600s; +20% threshold = 720s (12 min)
+  const underThreshold = evaluateTripDurationWarning(600, 10);
+  assert.equal(underThreshold.isExceeded, false);
+  assert.equal(underThreshold.thresholdSeconds, 720);
+  assert.equal(underThreshold.thresholdMins, 12);
+
+  // Exactly 20.0% (720s vs 600s) is NOT >20%, so must NOT trigger warning
+  const exactBoundary = evaluateTripDurationWarning(720, 10);
+  assert.equal(exactBoundary.isExceeded, false);
+  assert.equal(exactBoundary.overrunPercent, 20);
+
+  // 721s (>20% over 600s) MUST trigger warning
+  const justOver = evaluateTripDurationWarning(721, 10);
+  assert.equal(justOver.isExceeded, true);
+  assert.equal(justOver.overrunPercent, 20);
+  assert.ok(justOver.overrunMinutes >= 2);
+  assert.ok(justOver.message.includes('more than 20%'));
+
+  // 726s (+2.1 mins)
+  const over21 = evaluateTripDurationWarning(726, 10);
+  assert.equal(over21.isExceeded, true);
+  assert.equal(over21.overrunMinutes, 2.1);
+
+  // Significant overrun (26 mins vs 20 min estimate = +30%)
+  const heavyOverrun = evaluateTripDurationWarning(26 * 60, 20);
+  assert.equal(heavyOverrun.isExceeded, true);
+  assert.equal(heavyOverrun.overrunPercent, 30);
+  assert.equal(heavyOverrun.overrunMinutes, 6);
+  assert.equal(heavyOverrun.elapsedFormatted, '26:00');
+});
+
+test('interpolateLiveTrackingPosition and computeLiveTrackingMetrics calculate live vehicle movement, remaining km, and ETA', async () => {
+  const { interpolateLiveTrackingPosition, computeLiveTrackingMetrics } = await import('./aureliaLogic');
+
+  const pickup = { lat: 12.9592, lng: 77.6480 };
+  const dropoff = { lat: 12.9409, lng: 77.5955 };
+
+  // En-route pickup interpolates toward pickup
+  const approachStart = interpolateLiveTrackingPosition(pickup, dropoff, 0, 'en_route_pickup');
+  assert.ok(approachStart.lat < pickup.lat);
+  const approachEnd = interpolateLiveTrackingPosition(pickup, dropoff, 1, 'en_route_pickup');
+  assert.deepEqual(approachEnd, pickup);
+
+  // Arrived locks on pickup
+  assert.deepEqual(interpolateLiveTrackingPosition(pickup, dropoff, 0.5, 'arrived_pickup'), pickup);
+
+  // In-trip interpolates along pickup -> dropoff
+  const midTrip = interpolateLiveTrackingPosition(pickup, dropoff, 0.5, 'in_trip');
+  assert.ok(Math.abs(midTrip.lat - (pickup.lat + dropoff.lat) / 2) < 0.0001);
+  assert.ok(Math.abs(midTrip.lng - (pickup.lng + dropoff.lng) / 2) < 0.0001);
+
+  // Completed locks on dropoff
+  assert.deepEqual(interpolateLiveTrackingPosition(pickup, dropoff, 0.2, 'completed'), dropoff);
+
+  // Live metrics during in_trip
+  const metrics = computeLiveTrackingMetrics({
+    currentPos: midTrip,
+    pickup,
+    dropoff,
+    phase: 'in_trip',
+    plannedDistanceKm: 8.4,
+  });
+  assert.ok(metrics.remainingKm > 0);
+  assert.ok(metrics.etaMins >= 1);
+  assert.ok(metrics.progressFraction > 0.3 && metrics.progressFraction < 0.7);
+  assert.equal(metrics.phaseLabel, 'Live En Route to Destination');
+
+  // Completed metrics zero out remaining distance & ETA
+  const doneMetrics = computeLiveTrackingMetrics({
+    currentPos: dropoff,
+    pickup,
+    dropoff,
+    phase: 'completed',
+    plannedDistanceKm: 8.4,
+  });
+  assert.equal(doneMetrics.remainingKm, 0);
+  assert.equal(doneMetrics.etaMins, 0);
+  assert.equal(doneMetrics.progressFraction, 1);
+});
+
+test('evaluateDistrictTrafficRiskEstimation predicts high traffic risk based on historical district congestion data', async () => {
+  const { evaluateDistrictTrafficRiskEstimation } = await import('./aureliaLogic');
+
+  const blrRisk = evaluateDistrictTrafficRiskEstimation('Bengaluru Urban', 12, 18);
+  assert.equal(blrRisk.isHighRisk, true);
+  assert.ok(blrRisk.riskScore >= 35);
+  assert.ok(blrRisk.predictedMins > blrRisk.historicalAvgMins);
+  assert.ok(blrRisk.primaryCorridor.includes('Outer Ring'));
+
+  const quietRisk = evaluateDistrictTrafficRiskEstimation('Bagalkot', 10, 15);
+  assert.ok(typeof quietRisk.isHighRisk === 'boolean');
+  assert.ok(quietRisk.congestionIndex > 1.0);
+});
+
+
+
+

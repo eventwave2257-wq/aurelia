@@ -2,6 +2,7 @@ import { initializeApp } from 'firebase/app';
 import {
   getAuth,
   GoogleAuthProvider,
+  linkWithPhoneNumber,
   RecaptchaVerifier,
   signInWithPhoneNumber,
   signInWithPopup,
@@ -17,7 +18,7 @@ export const auth = getAuth(app);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const googleProvider = new GoogleAuthProvider();
 
-export { RecaptchaVerifier, signInWithPhoneNumber, signInWithPopup, signOut };
+export { linkWithPhoneNumber, RecaptchaVerifier, signInWithPhoneNumber, signInWithPopup, signOut };
 
 export const OperationType = {
   CREATE: 'create',

@@ -6,12 +6,16 @@ import {
   useMap,
   useMapsLibrary,
 } from '@vis.gl/react-google-maps';
-import { MapPin, Navigation } from 'lucide-react';
+import { MapPin, Navigation, Radio } from 'lucide-react';
 import { reportMapsErrorForQuota, useGoogleMapsSdk } from '../context/GoogleMapsSdkContext';
-import type { DriverTripPhase, GeoPoint, VehicleTier } from '../types/aurelia';
-import { computeStaticRoutePreviewGeometry } from '../utils/aureliaLogic';
+import type { DriverTripPhase, GeoPoint, LiveRideStatus, VehicleTier } from '../types/aurelia';
+import {
+  computeLiveTrackingMetrics,
+  computeStaticRoutePreviewGeometry,
+} from '../utils/aureliaLogic';
 
 interface ActiveTripMiniMapProps {
+  mapIdSuffix?: string;
   pickupLatLng: GeoPoint;
   dropoffLatLng: GeoPoint;
   pickupLabel: string;
@@ -20,23 +24,28 @@ interface ActiveTripMiniMapProps {
   isEmergencyOrCare: boolean;
   distanceKm: number;
   durationMins: number;
-  phase: DriverTripPhase;
+  phase: DriverTripPhase | LiveRideStatus;
+  driverLatLng?: GeoPoint | null;
+  isLiveTracking?: boolean;
+  viewerRole?: 'driver' | 'customer';
 }
 
 function MiniMapRouteOverlay({
+  mapId,
   origin,
   destination,
   routeColor,
   travelMode,
   onRouteMetricResolved,
 }: {
+  mapId: string;
   origin: GeoPoint;
   destination: GeoPoint;
   routeColor: string;
   travelMode: 'TWO_WHEELER' | 'DRIVING';
   onRouteMetricResolved?: (km: number, mins: number) => void;
 }) {
-  const map = useMap('active-trip-mini-map');
+  const map = useMap(mapId);
   const routesLib = useMapsLibrary('routes');
   const onMetricRef = useRef(onRouteMetricResolved);
   onMetricRef.current = onRouteMetricResolved;
@@ -150,6 +159,7 @@ function MiniMapRouteOverlay({
 }
 
 export function ActiveTripMiniMap({
+  mapIdSuffix = 'driver',
   pickupLatLng,
   dropoffLatLng,
   pickupLabel,
@@ -159,9 +169,13 @@ export function ActiveTripMiniMap({
   distanceKm,
   durationMins,
   phase,
+  driverLatLng = null,
+  isLiveTracking = false,
+  viewerRole = 'driver',
 }: ActiveTripMiniMapProps) {
   const { hasApiKey, isFailed } = useGoogleMapsSdk();
   const [resolvedMetrics, setResolvedMetrics] = useState<{ km: number; mins: number } | null>(null);
+  const googleMapInstanceId = `active-trip-mini-map-${mapIdSuffix}`;
 
   useEffect(() => {
     setResolvedMetrics(null);
@@ -172,52 +186,103 @@ export function ActiveTripMiniMap({
     [pickupLatLng, dropoffLatLng]
   );
 
+  const displayKm = resolvedMetrics?.km ?? distanceKm;
+  const displayMins = resolvedMetrics?.mins ?? durationMins;
+
+  const liveMetrics = useMemo(() => {
+    if (!driverLatLng) return null;
+    return computeLiveTrackingMetrics({
+      currentPos: driverLatLng,
+      pickup: pickupLatLng,
+      dropoff: dropoffLatLng,
+      phase,
+      plannedDistanceKm: displayKm,
+    });
+  }, [driverLatLng, pickupLatLng, dropoffLatLng, phase, displayKm]);
+
   const canRenderGoogleMap = hasApiKey && !isFailed;
   const routeColor = isEmergencyOrCare ? '#10B981' : '#D4AF63';
   const travelMode: 'TWO_WHEELER' | 'DRIVING' = vehicleTier === 'bike' ? 'TWO_WHEELER' : 'DRIVING';
-  const displayKm = resolvedMetrics?.km ?? distanceKm;
-  const displayMins = resolvedMetrics?.mins ?? durationMins;
 
   const phaseTag =
     phase === 'completed'
       ? 'Completed'
       : phase === 'in_trip'
         ? 'In Transit'
-        : phase === 'arrived_pickup'
+        : phase === 'arrived_pickup' || phase === 'arrived'
           ? 'At Pickup'
-          : 'To Pickup';
+          : phase === 'en_route_pickup' || phase === 'en_route' || phase === 'matched'
+            ? 'To Pickup'
+            : 'Searching';
 
   // Curved midpoint for fallback SVG corridor arc
   const midX = (geometry.pickupSvg.x + geometry.dropoffSvg.x) / 2;
   const midY = (geometry.pickupSvg.y + geometry.dropoffSvg.y) / 2 - 12;
 
+  // Position the live driver SVG pin smoothly along the corridor arc
+  const driverSvgPoint = useMemo(() => {
+    if (!driverLatLng || !liveMetrics) return null;
+    const isApproachPhase =
+      phase === 'en_route_pickup' ||
+      phase === 'en_route' ||
+      phase === 'matched' ||
+      phase === 'searching';
+    if (isApproachPhase) {
+      const approachX = Math.max(8, geometry.pickupSvg.x - 10 * (1 - liveMetrics.progressFraction));
+      const approachY = Math.min(92, geometry.pickupSvg.y + 10 * (1 - liveMetrics.progressFraction));
+      return { x: Number(approachX.toFixed(1)), y: Number(approachY.toFixed(1)) };
+    }
+    const t = liveMetrics.progressFraction;
+    const oneMinusT = 1 - t;
+    const ctrlY = Math.max(10, midY);
+    const x =
+      oneMinusT * oneMinusT * geometry.pickupSvg.x +
+      2 * oneMinusT * t * midX +
+      t * t * geometry.dropoffSvg.x;
+    const y =
+      oneMinusT * oneMinusT * geometry.pickupSvg.y +
+      2 * oneMinusT * t * ctrlY +
+      t * t * geometry.dropoffSvg.y;
+    return { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)) };
+  }, [driverLatLng, liveMetrics, phase, geometry.pickupSvg, geometry.dropoffSvg, midX, midY]);
+
   return (
     <div
-      data-testid="active-trip-mini-map"
-      aria-label={`Static route map from ${pickupLabel} to ${dropoffLabel}`}
+      data-testid={viewerRole === 'customer' ? 'customer-live-tracking-map' : 'active-trip-mini-map'}
+      aria-label={`Route map from ${pickupLabel} to ${dropoffLabel}`}
       className="rounded-2xl overflow-hidden border border-stone-200/90 dark:border-white/10 bg-stone-50 dark:bg-[#080A0F] shadow-sm"
     >
       {/* Top Unobscured Telemetry Header */}
       <div className="px-3 py-1.5 bg-stone-50 dark:bg-[#07080B] border-b border-stone-200/80 dark:border-white/10 flex items-center justify-between gap-2 text-[11px]">
         <span className="font-semibold text-[#9A722A] dark:text-[#E6C77E] flex items-center gap-1.5 min-w-0 truncate">
-          <Navigation className="w-3 h-3 shrink-0" />
+          {isLiveTracking ? (
+            <Radio className="w-3.5 h-3.5 text-emerald-500 animate-pulse shrink-0" />
+          ) : (
+            <Navigation className="w-3 h-3 shrink-0" />
+          )}
           <span className="truncate">
-            {canRenderGoogleMap ? 'Static Route Map · Google Maps' : 'Route Corridor Preview'}
+            {isLiveTracking
+              ? `LIVE GPS · ${liveMetrics?.phaseLabel ?? 'Tracking Active'}`
+              : canRenderGoogleMap
+                ? 'Route Map · Google Maps'
+                : 'Route Corridor Preview'}
           </span>
         </span>
         <span
           data-testid="active-trip-mini-map-metrics"
           className="font-mono-tabular font-bold text-stone-800 dark:text-stone-100 shrink-0"
         >
-          {displayKm} km · {displayMins} min · {phaseTag}
+          {liveMetrics && isLiveTracking
+            ? `${liveMetrics.remainingKm} km left · ${liveMetrics.etaMins}m ETA · ${phaseTag}`
+            : `${displayKm} km · ${displayMins} min · ${phaseTag}`}
         </span>
       </div>
 
-      {/* Fixed-Height Static Map Viewport */}
+      {/* Fixed-Height Map Viewport */}
       <div className="relative w-full h-36 sm:h-40 bg-stone-900 overflow-hidden select-none">
         {canRenderGoogleMap ? (
           <GoogleMap
-            id="active-trip-mini-map"
+            id={googleMapInstanceId}
             mapId="DEMO_MAP_ID"
             defaultCenter={geometry.center}
             defaultZoom={geometry.zoom}
@@ -233,6 +298,7 @@ export function ActiveTripMiniMap({
             style={{ width: '100%', height: '100%' }}
           >
             <MiniMapRouteOverlay
+              mapId={googleMapInstanceId}
               origin={pickupLatLng}
               destination={dropoffLatLng}
               routeColor={routeColor}
@@ -247,6 +313,21 @@ export function ActiveTripMiniMap({
             <AdvancedMarker position={dropoffLatLng} title={`Drop-off: ${dropoffLabel}`}>
               <Pin background="#10B981" borderColor="#064E3B" glyphColor="#FFFFFF" scale={0.85} />
             </AdvancedMarker>
+
+            {driverLatLng && (
+              <AdvancedMarker
+                position={driverLatLng}
+                title={`Live Driver GPS (${driverLatLng.lat.toFixed(4)}, ${driverLatLng.lng.toFixed(4)})`}
+              >
+                <div
+                  data-testid="mini-map-live-driver-pin"
+                  className="w-6 h-6 rounded-full bg-white border-2 border-[#B48A3E] shadow-lg flex items-center justify-center"
+                >
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping absolute" />
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 relative" />
+                </div>
+              </AdvancedMarker>
+            )}
           </GoogleMap>
         ) : (
           <div className="w-full h-full relative bg-[radial-gradient(circle_at_25%_20%,rgba(212,175,99,0.16),transparent_55%),linear-gradient(145deg,#0B0E14,#121824)]">
@@ -258,8 +339,24 @@ export function ActiveTripMiniMap({
             >
               {[25, 50, 75].map((pos) => (
                 <g key={pos} opacity="0.16">
-                  <line x1={pos} y1="0" x2={pos} y2="100" stroke="#E6C77E" strokeWidth="0.35" strokeDasharray="1.5 1.5" />
-                  <line x1="0" y1={pos} x2="100" y2={pos} stroke="#E6C77E" strokeWidth="0.35" strokeDasharray="1.5 1.5" />
+                  <line
+                    x1={pos}
+                    y1="0"
+                    x2={pos}
+                    y2="100"
+                    stroke="#E6C77E"
+                    strokeWidth="0.35"
+                    strokeDasharray="1.5 1.5"
+                  />
+                  <line
+                    x1="0"
+                    y1={pos}
+                    x2="100"
+                    y2={pos}
+                    stroke="#E6C77E"
+                    strokeWidth="0.35"
+                    strokeDasharray="1.5 1.5"
+                  />
                 </g>
               ))}
               <path
@@ -268,7 +365,9 @@ export function ActiveTripMiniMap({
                 stroke={routeColor}
                 strokeWidth="2.2"
                 strokeLinecap="round"
-                strokeDasharray={phase === 'en_route_pickup' ? '3 2' : undefined}
+                strokeDasharray={
+                  phase === 'en_route_pickup' || phase === 'en_route' ? '3 2' : undefined
+                }
               />
               <circle
                 cx={geometry.pickupSvg.x}
@@ -286,7 +385,31 @@ export function ActiveTripMiniMap({
                 stroke="#064E3B"
                 strokeWidth="1.1"
               />
+              {driverSvgPoint && (
+                <g data-testid="mini-map-live-driver-pin">
+                  <circle
+                    cx={driverSvgPoint.x}
+                    cy={driverSvgPoint.y}
+                    r="6.2"
+                    fill="rgba(16, 185, 129, 0.28)"
+                  />
+                  <circle
+                    cx={driverSvgPoint.x}
+                    cy={driverSvgPoint.y}
+                    r="3.4"
+                    fill="#FFFFFF"
+                    stroke="#10B981"
+                    strokeWidth="1.3"
+                  />
+                </g>
+              )}
             </svg>
+          </div>
+        )}
+
+        {driverLatLng && isLiveTracking && (
+          <div className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md bg-black/75 border border-emerald-500/40 text-[10px] font-mono-tabular text-emerald-300 pointer-events-none">
+            {driverLatLng.lat.toFixed(4)}°N, {driverLatLng.lng.toFixed(4)}°E
           </div>
         )}
       </div>
@@ -296,14 +419,20 @@ export function ActiveTripMiniMap({
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="w-2 h-2 rounded-full bg-[#D4AF63] shrink-0" aria-hidden="true" />
           <MapPin className="w-3 h-3 text-[#B48A3E] dark:text-[#E6C77E] shrink-0" />
-          <span className="truncate font-medium text-stone-700 dark:text-stone-200" title={pickupLabel}>
+          <span
+            className="truncate font-medium text-stone-700 dark:text-stone-200"
+            title={pickupLabel}
+          >
             {pickupLabel}
           </span>
         </div>
         <div className="flex items-center justify-end gap-1.5 min-w-0">
           <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" aria-hidden="true" />
           <MapPin className="w-3 h-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
-          <span className="truncate font-medium text-stone-700 dark:text-stone-200" title={dropoffLabel}>
+          <span
+            className="truncate font-medium text-stone-700 dark:text-stone-200"
+            title={dropoffLabel}
+          >
             {dropoffLabel}
           </span>
         </div>

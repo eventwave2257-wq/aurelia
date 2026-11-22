@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -24,6 +25,7 @@ import {
   db,
   googleProvider,
   handleFirestoreError,
+  linkWithPhoneNumber,
   OperationType,
   RecaptchaVerifier,
   signInWithPhoneNumber,
@@ -31,6 +33,12 @@ import {
   signOut,
   testConnection,
 } from '../firebase';
+import {
+  classifyFirebasePhoneAuthError,
+  formatIndianE164Phone,
+  isVerifiedFirebaseAuthUser,
+  normalizeOtpInput,
+} from '../utils/aureliaLogic';
 import {
   INITIAL_COMPLAINTS,
   INITIAL_FLEET_APPLICANTS,
@@ -52,6 +60,8 @@ interface FirebaseContextValue {
   user: User | null;
   authReady: boolean;
   isAdminUser: boolean;
+  isAuthVerified: boolean;
+  verifiedPhoneNumber: string | null;
   connectionOk: boolean;
   lastError: string | null;
   liveRides: LiveRideOrder[];
@@ -63,7 +73,24 @@ interface FirebaseContextValue {
   sendPhoneOtpViaFirebase: (
     phone10Digits: string,
     recaptchaContainerId: string
-  ) => Promise<{ ok: boolean; confirmation?: ConfirmationResult; error?: string }>;
+  ) => Promise<{
+    ok: boolean;
+    confirmation?: ConfirmationResult;
+    error?: string;
+    errorCode?: string;
+    canFallbackToGateway?: boolean;
+    requiresConsoleSetup?: boolean;
+  }>;
+  verifyPhoneOtpViaFirebase: (
+    confirmation: ConfirmationResult,
+    otpCode: string
+  ) => Promise<{
+    ok: boolean;
+    uid?: string;
+    phoneNumber?: string | null;
+    error?: string;
+    errorCode?: string;
+  }>;
   syncDriverAccountToFirestore: (
     profile: DriverProfileData,
     prefs: DriverPreferences
@@ -142,6 +169,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   const [authReady, setAuthReady] = useState<boolean>(false);
   const [connectionOk, setConnectionOk] = useState<boolean>(true);
   const [lastError, setLastError] = useState<string | null>(null);
+  const recaptchaVerifierRef = useRef<RecaptchaVerifier | null>(null);
 
   const [liveRides, setLiveRides] = useState<LiveRideOrder[]>(initialLocal.liveRides);
   const [payouts, setPayouts] = useState<DriverPayoutRecord[]>(initialLocal.payouts);
@@ -150,6 +178,8 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     initialLocal.fleetApplicants
   );
 
+  const isAuthVerified = isVerifiedFirebaseAuthUser(user);
+  const verifiedPhoneNumber = user?.phoneNumber ?? null;
   const isAdminUser = Boolean(
     user?.email && user.emailVerified && user.email === BOOTSTRAPPED_ADMIN_EMAIL
   );
@@ -174,9 +204,9 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     }
   }, [liveRides, payouts, complaints, fleetApplicants]);
 
-  // Attach authenticated Firestore listeners cleanly when authReady && user && emailVerified
+  // Attach authenticated Firestore listeners cleanly when authReady && isAuthVerified
   useEffect(() => {
-    if (!authReady || !user || !user.emailVerified) return;
+    if (!authReady || !user || !isAuthVerified) return;
 
     const ridesQuery = isAdminUser
       ? query(collection(db, 'rides'))
@@ -280,7 +310,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       unsubPayouts();
       unsubComplaints();
     };
-  }, [authReady, user, isAdminUser]);
+  }, [authReady, user, isAuthVerified, isAdminUser]);
 
   const signInWithGoogle = useCallback(async () => {
     setLastError(null);
@@ -300,23 +330,72 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
   const sendPhoneOtpViaFirebase = useCallback(
     async (phone10Digits: string, recaptchaContainerId: string) => {
+      const e164Phone = formatIndianE164Phone(phone10Digits);
+      if (!e164Phone) {
+        return {
+          ok: false,
+          error: 'Enter a valid 10-digit +91 Indian mobile number.',
+          errorCode: 'auth/invalid-phone-number',
+          canFallbackToGateway: false,
+          requiresConsoleSetup: false,
+        };
+      }
+
+      const cleanupRecaptchaUi = () => {
+        try {
+          recaptchaVerifierRef.current?.clear();
+        } catch {
+          // ignore stale verifier cleanup errors
+        }
+        recaptchaVerifierRef.current = null;
+        if (typeof document !== 'undefined') {
+          const el = document.getElementById(recaptchaContainerId);
+          if (el) el.innerHTML = '';
+          // Remove orphaned Google reCAPTCHA challenge overlays appended directly to document.body
+          document.querySelectorAll('body > div').forEach((div) => {
+            if (
+              div.querySelector('iframe[src*="recaptcha/api2/bframe"]') ||
+              div.querySelector('iframe[src*="recaptcha/enterprise/bframe"]')
+            ) {
+              div.remove();
+            }
+          });
+        }
+      };
+
+      cleanupRecaptchaUi();
+
       let verifier: RecaptchaVerifier | null = null;
       try {
-        const clean = phone10Digits.replace(/\D/g, '').slice(-10);
         const container =
           typeof document !== 'undefined' ? document.getElementById(recaptchaContainerId) : null;
-        if (container) container.innerHTML = '';
+        if (!container) {
+          return {
+            ok: false,
+            error: 'reCAPTCHA container unavailable in DOM.',
+            errorCode: 'auth/captcha-check-failed',
+            canFallbackToGateway: true,
+            requiresConsoleSetup: false,
+          };
+        }
 
         verifier = new RecaptchaVerifier(auth, recaptchaContainerId, {
           size: 'invisible',
         });
+        recaptchaVerifierRef.current = verifier;
+
         const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error('Firebase SMS reCAPTCHA timed out')), 2500);
+          setTimeout(() => reject(new Error('Firebase SMS reCAPTCHA timed out')), 6500);
         });
-        const confirmation = await Promise.race([
-          signInWithPhoneNumber(auth, `+91${clean}`, verifier),
-          timeoutPromise,
-        ]);
+
+        const shouldLinkExistingAccount = Boolean(auth.currentUser && !auth.currentUser.phoneNumber);
+        const authPromise = shouldLinkExistingAccount && auth.currentUser
+          ? linkWithPhoneNumber(auth.currentUser, e164Phone, verifier)
+          : signInWithPhoneNumber(auth, e164Phone, verifier);
+        // Prevent late unhandled rejection if timeoutPromise settles first
+        void authPromise.catch(() => {});
+
+        const confirmation = await Promise.race([authPromise, timeoutPromise]);
         return { ok: true, confirmation };
       } catch (err) {
         try {
@@ -324,8 +403,46 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         } catch {
           // ignore reCAPTCHA clear errors
         }
-        const rawMsg = err instanceof Error ? err.message : 'Firebase SMS delivery unavailable.';
-        return { ok: false, error: rawMsg };
+        cleanupRecaptchaUi();
+        const classified = classifyFirebasePhoneAuthError(err);
+        return {
+          ok: false,
+          error: classified.message,
+          errorCode: classified.code,
+          canFallbackToGateway: classified.canFallbackToGateway,
+          requiresConsoleSetup: classified.requiresConsoleSetup,
+        };
+      }
+    },
+    []
+  );
+
+  const verifyPhoneOtpViaFirebase = useCallback(
+    async (confirmation: ConfirmationResult, otpCode: string) => {
+      const cleanCode = normalizeOtpInput(otpCode);
+      if (cleanCode.length < 4) {
+        return {
+          ok: false,
+          error: 'Enter the 6-digit verification code sent by Firebase SMS.',
+          errorCode: 'auth/invalid-verification-code',
+        };
+      }
+      try {
+        const cred = await confirmation.confirm(cleanCode);
+        setUser(cred.user);
+        setLastError(null);
+        return {
+          ok: true,
+          uid: cred.user.uid,
+          phoneNumber: cred.user.phoneNumber ?? null,
+        };
+      } catch (err) {
+        const classified = classifyFirebasePhoneAuthError(err);
+        return {
+          ok: false,
+          error: classified.message,
+          errorCode: classified.code,
+        };
       }
     },
     []
@@ -362,7 +479,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         return [applicantEntry, ...prev];
       });
 
-      if (!user || !user.emailVerified) return;
+      if (!user || !isVerifiedFirebaseAuthUser(user)) return;
 
       const driverPath = `drivers/${user.uid}`;
       try {
@@ -417,7 +534,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       };
       setLiveRides((prev) => [normalized, ...prev]);
 
-      if (user && user.emailVerified) {
+      if (user && isVerifiedFirebaseAuthUser(user)) {
         const path = `rides/${normalized.id}`;
         try {
           await setDoc(doc(db, 'rides', normalized.id), {
@@ -476,7 +593,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         prev.map((r) => (r.id === rideId ? { ...r, ...patch, updatedAt: nowIso } : r))
       );
 
-      if (user && user.emailVerified) {
+      if (user && isVerifiedFirebaseAuthUser(user)) {
         const path = `rides/${rideId}`;
         try {
           await updateDoc(doc(db, 'rides', rideId), {
@@ -495,7 +612,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     async (payout: DriverPayoutRecord) => {
       setPayouts((prev) => [payout, ...prev]);
 
-      if (user && user.emailVerified) {
+      if (user && isVerifiedFirebaseAuthUser(user)) {
         const path = `payouts/${payout.id}`;
         try {
           await setDoc(doc(db, 'payouts', payout.id), {
@@ -550,7 +667,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     async (complaint: SupportComplaint) => {
       setComplaints((prev) => [complaint, ...prev]);
 
-      if (user && user.emailVerified) {
+      if (user && isVerifiedFirebaseAuthUser(user)) {
         const path = `complaints/${complaint.id}`;
         try {
           await setDoc(doc(db, 'complaints', complaint.id), {
@@ -639,6 +756,8 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     user,
     authReady,
     isAdminUser,
+    isAuthVerified,
+    verifiedPhoneNumber,
     connectionOk,
     lastError,
     liveRides,
@@ -648,6 +767,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     signInWithGoogle,
     signOutUser,
     sendPhoneOtpViaFirebase,
+    verifyPhoneOtpViaFirebase,
     syncDriverAccountToFirestore,
     createLiveRideOrder,
     updateLiveRideStatus,

@@ -1,0 +1,36 @@
+{
+  "packageId": "in.aureliamobility.karnataka",
+  "host": "ais-pre-b76zssplcxvlsfvxrxba73-869832431781.asia-northeast1.run.app",
+  "name": "AURELIA — Karnataka Chauffeur & Care",
+  "launcherName": "AURELIA",
+  "display": "standalone",
+  "themeColor": "#0B0D12",
+  "themeColorDark": "#0B0D12",
+  "navigationColor": "#0B0D12",
+  "navigationColorDark": "#0B0D12",
+  "backgroundColor": "#0B0D12",
+  "enableNotifications": true,
+  "startUrl": "/",
+  "iconUrl": "https://ais-pre-b76zssplcxvlsfvxrxba73-869832431781.asia-northeast1.run.app/pwa-512x512.png",
+  "maskableIconUrl": "https://ais-pre-b76zssplcxvlsfvxrxba73-869832431781.asia-northeast1.run.app/pwa-maskable-512x512.png",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "./android.keystore",
+    "alias": "aurelia"
+  },
+  "appVersionName": "1.2.0",
+  "appVersionCode": 12,
+  "shortcuts": [],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://ais-pre-b76zssplcxvlsfvxrxba73-869832431781.asia-northeast1.run.app/manifest.webmanifest",
+  "fallbackType": "customtabs",
+  "features": {
+    "locationDelegation": {
+      "enabled": true
+    }
+  },
+  "orientation": "default",
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "minSdkVersion": 24
+}

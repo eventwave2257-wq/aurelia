@@ -584,4 +584,43 @@ export interface TripCompletionProgress {
   steps: TripCompletionStep[];
 }
 
+export type LiveTrackingSource = 'corridor_sim' | 'device_gps';
+
+export interface TripDurationWarning {
+  isExceeded: boolean;
+  elapsedSeconds: number;
+  elapsedMins: number;
+  estimatedMins: number;
+  thresholdSeconds: number;
+  thresholdMins: number;
+  overrunSeconds: number;
+  overrunMinutes: number;
+  overrunPercent: number;
+  elapsedFormatted: string;
+  estimatedFormatted: string;
+  title: string;
+  message: string;
+}
+
+export interface LiveTrackingMetrics {
+  currentPos: GeoPoint;
+  targetPos: GeoPoint;
+  remainingKm: number;
+  etaMins: number;
+  bearingDeg: number;
+  progressFraction: number;
+  phaseLabel: string;
+}
+
+export interface TrafficRiskEstimation {
+  isHighRisk: boolean;
+  riskScore: number; // 0 to 100
+  congestionIndex: number; // multiplier e.g. 1.35x
+  historicalAvgMins: number;
+  predictedMins: number;
+  primaryCorridor: string;
+  riskLabel: string;
+  recommendation: string;
+}
+
 

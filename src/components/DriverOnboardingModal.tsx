@@ -35,10 +35,28 @@ import {
 import { QrCodePreview } from './QrCodePreview';
 
 interface DriverOnboardingModalProps {
+  verifiedPhoneNumber?: string | null;
   onSendFirebasePhoneOtp?: (
     phone10Digits: string,
     recaptchaContainerId: string
-  ) => Promise<{ ok: boolean; confirmation?: ConfirmationResult; error?: string }>;
+  ) => Promise<{
+    ok: boolean;
+    confirmation?: ConfirmationResult;
+    error?: string;
+    errorCode?: string;
+    canFallbackToGateway?: boolean;
+    requiresConsoleSetup?: boolean;
+  }>;
+  onVerifyFirebasePhoneOtp?: (
+    confirmation: ConfirmationResult,
+    otpCode: string
+  ) => Promise<{
+    ok: boolean;
+    uid?: string;
+    phoneNumber?: string | null;
+    error?: string;
+    errorCode?: string;
+  }>;
   onSwitchPortal?: (portal: 'customer' | 'admin') => void;
   onComplete: (profile: DriverProfileData, tier: VehicleTier | 'auto') => void;
 }
@@ -46,14 +64,18 @@ interface DriverOnboardingModalProps {
 type OnboardingStep = 'phone' | 'otp' | 'credentials' | 'demoride' | 'success';
 
 export function DriverOnboardingModal({
+  verifiedPhoneNumber,
   onSendFirebasePhoneOtp,
+  onVerifyFirebasePhoneOtp,
   onSwitchPortal,
   onComplete,
 }: DriverOnboardingModalProps) {
   const [step, setStep] = useState<OnboardingStep>('phone');
   const [phone, setPhone] = useState<string>('9845012345');
-  const [useFirebaseSms, setUseFirebaseSms] = useState<boolean>(false);
+  const [useFirebaseSms, setUseFirebaseSms] = useState<boolean>(true);
   const [fbConfirmation, setFbConfirmation] = useState<ConfirmationResult | null>(null);
+  const [firebasePhoneLinked, setFirebasePhoneLinked] = useState<boolean>(Boolean(verifiedPhoneNumber));
+  const [firebaseConsoleNotice, setFirebaseConsoleNotice] = useState<string | null>(null);
   const [smsGatewayNote, setSmsGatewayNote] = useState<string | null>(null);
   const [smsInboxCode, setSmsInboxCode] = useState<string | null>(null);
   const [phoneError, setPhoneError] = useState<string | null>(null);
@@ -117,15 +139,17 @@ export function DriverOnboardingModal({
     const cleanPhone = normalizeIndianMobile(phoneNumber);
     setOtpError(null);
     setSmsGatewayNote(null);
+    setFirebaseConsoleNotice(null);
     setIsSendingOtp(true);
 
-    // Optional Firebase Phone Auth SMS when explicitly opted in by user
+    // Primary Firebase Phone Auth OTP flow (reCAPTCHA + SMS / test numbers)
+    let fallbackNotePrefix: string | null = null;
     if (useFirebaseSms && onSendFirebasePhoneOtp) {
       const fbRes = await onSendFirebasePhoneOtp(cleanPhone, 'aurelia-recaptcha-container');
       if (fbRes.ok && fbRes.confirmation) {
         setFbConfirmation(fbRes.confirmation);
         setSmsInboxCode(null);
-        setSmsGatewayNote(`Firebase SMS OTP dispatched to ${maskIndianPhoneNumber(cleanPhone)}.`);
+        setSmsGatewayNote(`Firebase Phone Auth SMS OTP dispatched to ${maskIndianPhoneNumber(cleanPhone)}.`);
         setIsSendingOtp(false);
         setResendCountdown(30);
         return true;
@@ -134,9 +158,16 @@ export function DriverOnboardingModal({
         const rcContainer = document.getElementById('aurelia-recaptcha-container');
         if (rcContainer) rcContainer.innerHTML = '';
       }
-      setSmsGatewayNote(
-        'Firebase SMS carrier unavailable in preview — delivered via Aurelia Secure OTP Gateway.'
-      );
+      if (!fbRes.canFallbackToGateway) {
+        setPhoneError(fbRes.error || 'Could not dispatch Firebase SMS OTP.');
+        setIsSendingOtp(false);
+        return false;
+      }
+      if (fbRes.requiresConsoleSetup && fbRes.error) {
+        setFirebaseConsoleNotice(fbRes.error);
+      }
+      fallbackNotePrefix =
+        'Firebase SMS carrier not active for this domain — delivered via Aurelia Secure OTP Gateway fallback.';
     }
 
     const fallbackCode = codeToShare || generateVerificationOtp();
@@ -158,23 +189,19 @@ export function DriverOnboardingModal({
       if (typeof data.deliveredCodePreview === 'string' && /^\d{4}$/.test(data.deliveredCodePreview)) {
         activeCode = data.deliveredCodePreview;
       }
-      if (!useFirebaseSms) {
-        setSmsGatewayNote(
+      setSmsGatewayNote(
+        fallbackNotePrefix ??
           `OTP dispatched via Aurelia Secure SMS Gateway to ${data.maskedPhone ?? maskIndianPhoneNumber(cleanPhone)}.`
-        );
-      }
+      );
     } catch {
       setSmsGatewayNote(
-        `Offline tolerance active — local verification session started for ${maskIndianPhoneNumber(cleanPhone)}.`
+        fallbackNotePrefix ??
+          `Offline tolerance active — local verification session started for ${maskIndianPhoneNumber(cleanPhone)}.`
       );
     }
 
     setGeneratedOtp(activeCode);
-    setSmsInboxCode(activeCode);
-
-    if (typeof window !== 'undefined') {
-      (window as any).__LAST_DISPATCHED_OTP__ = activeCode;
-    }
+    setSmsInboxCode(null);
 
     setIsSendingOtp(false);
     setResendCountdown(30);
@@ -236,8 +263,19 @@ export function DriverOnboardingModal({
     const cleanOtp = normalizeOtpInput(otp);
 
     if (fbConfirmation) {
+      if (onVerifyFirebasePhoneOtp) {
+        const verifyRes = await onVerifyFirebasePhoneOtp(fbConfirmation, cleanOtp);
+        if (!verifyRes.ok) {
+          setOtpError(verifyRes.error || 'Invalid Firebase SMS OTP code. Please check your SMS and try again.');
+          return;
+        }
+        setFirebasePhoneLinked(true);
+        setStep('credentials');
+        return;
+      }
       try {
         await fbConfirmation.confirm(cleanOtp);
+        setFirebasePhoneLinked(true);
         setStep('credentials');
         return;
       } catch {
@@ -312,12 +350,11 @@ export function DriverOnboardingModal({
         if (prev >= 100) {
           clearInterval(interval);
           setDemoRunning(false);
-          setStep('success');
           return 100;
         }
-        return prev + 25;
+        return prev + 10;
       });
-    }, 500);
+    }, 400);
   };
 
   const handleFinishOnboarding = () => {
@@ -406,7 +443,7 @@ export function DriverOnboardingModal({
 
         <div className="px-6 pt-3 pb-0">
           <p className="text-xs text-stone-600 dark:text-stone-400">
-            {step === 'phone' && 'Enter your +91 mobile number to receive a 4-digit verification OTP'}
+            {step === 'phone' && 'Enter your +91 mobile number to receive a Firebase Phone Auth or Gateway OTP'}
             {step === 'otp' && `Verification session active for ${maskIndianPhoneNumber(phone)}`}
             {step === 'credentials' && 'Confirm mobile number, link Payment QR Code (₹3/ride fee auto-deducted), and set your account password'}
             {step === 'demoride' && 'Complete your 3 km demo ride to activate Karnataka dispatch'}
@@ -442,12 +479,18 @@ export function DriverOnboardingModal({
                 </div>
               </div>
 
-              <label className="flex items-center justify-between gap-2 p-3 rounded-2xl bg-stone-50 dark:bg-[#080A0F] border border-stone-200 dark:border-white/10 text-xs cursor-pointer">
-                <span className="font-medium text-stone-700 dark:text-stone-300">
-                  Use Firebase Phone Auth SMS (requires Blaze SMS billing; off = instant Aurelia SMS Gateway)
-                </span>
+              <label className="flex items-center justify-between gap-3 p-3 rounded-2xl bg-stone-50 dark:bg-[#080A0F] border border-stone-200 dark:border-white/10 text-xs cursor-pointer">
+                <div className="space-y-0.5">
+                  <span className="font-semibold text-stone-800 dark:text-stone-200 block">
+                    Firebase Phone Auth OTP (Primary · reCAPTCHA + SMS)
+                  </span>
+                  <span className="text-[11px] text-stone-500 dark:text-stone-400 block">
+                    Sends 6-digit Firebase Auth OTP; auto-falls back to Aurelia SMS Gateway if carrier setup is pending.
+                  </span>
+                </div>
                 <input
                   type="checkbox"
+                  data-testid="onboarding-firebase-otp-toggle"
                   checked={useFirebaseSms}
                   onChange={(e) => setUseFirebaseSms(e.target.checked)}
                   className="w-4 h-4 accent-[#D4AF63] shrink-0"
@@ -476,7 +519,7 @@ export function DriverOnboardingModal({
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 font-semibold text-amber-800 dark:text-[#E2C77D]">
                     <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                    <span>OTP Dispatched</span>
+                    <span>{fbConfirmation ? 'Firebase Phone Auth OTP Sent' : 'OTP Dispatched'}</span>
                   </div>
                   <span className="text-[11px] font-mono-tabular font-semibold text-emerald-700 dark:text-emerald-300">
                     +91 {phone}
@@ -484,35 +527,15 @@ export function DriverOnboardingModal({
                 </div>
                 <p className="text-stone-600 dark:text-stone-400 leading-relaxed">
                   {smsGatewayNote ??
-                    'A 4-digit verification code was delivered to your mobile number.'}
+                    'A verification code was delivered to your mobile number.'}
                 </p>
-
-                {/* Virtual Carrier SMS Inbox Preview for instant verification on web/desktop */}
-                {!fbConfirmation && smsInboxCode && (
-                  <div
-                    data-testid="virtual-sms-inbox-card"
-                    className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-300/80 dark:border-emerald-700/60 flex items-center justify-between gap-3"
+                {firebaseConsoleNotice && (
+                  <p
+                    data-testid="onboarding-firebase-setup-hint"
+                    className="text-[11px] text-amber-900 dark:text-amber-200 bg-amber-100/80 dark:bg-amber-900/30 border border-amber-300/70 dark:border-amber-600/40 rounded-xl px-3 py-2"
                   >
-                    <div className="min-w-0">
-                      <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-emerald-800 dark:text-emerald-300">
-                        SMS Inbox Preview · Aurelia Gateway
-                      </p>
-                      <p className="text-xs text-stone-800 dark:text-stone-100 mt-0.5 font-mono-tabular">
-                        Code: <strong data-testid="virtual-sms-code">{smsInboxCode}</strong> (expires in 10m)
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      data-testid="autofill-otp-btn"
-                      onClick={() => {
-                        setOtp(smsInboxCode);
-                        setOtpError(null);
-                      }}
-                      className="min-h-[36px] px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 dark:bg-emerald-600 dark:hover:bg-emerald-500 text-white text-[11px] font-bold whitespace-nowrap shrink-0 cursor-pointer"
-                    >
-                      Auto-Fill Code
-                    </button>
-                  </div>
+                    {firebaseConsoleNotice}
+                  </p>
                 )}
 
                 {!fbConfirmation && (
@@ -551,7 +574,7 @@ export function DriverOnboardingModal({
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-semibold text-stone-700 dark:text-stone-300">
-                    Enter Verification Code
+                    {fbConfirmation ? 'Enter 6-Digit Firebase SMS Code' : 'Enter Verification Code'}
                   </label>
                   <button
                     type="button"
@@ -575,7 +598,7 @@ export function DriverOnboardingModal({
                     setOtp(normalizeOtpInput(e.target.value));
                     if (otpError) setOtpError(null);
                   }}
-                  placeholder="• • • •"
+                  placeholder={fbConfirmation ? '• • • • • •' : '• • • •'}
                   className="w-full min-h-[48px] px-4 text-center tracking-[0.5em] text-xl rounded-2xl bg-stone-50 dark:bg-[#080A0F] border border-stone-300 dark:border-stone-700 font-mono-tabular text-stone-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
                 />
                 {otpError && (
@@ -604,9 +627,16 @@ export function DriverOnboardingModal({
             <form onSubmit={(e) => void handleSaveCredentials(e)} className="space-y-3.5 max-h-[500px] overflow-y-auto pr-1">
               {/* Post-Verification Linked Mobile & Account Payout Info */}
               <div className="p-3 rounded-2xl bg-emerald-50/70 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 space-y-2">
-                <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
-                  <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>Post-Verification Payout Account (Flat ₹3/ride fee · Remainder Auto-Transferred)</span>
+                <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-emerald-800 dark:text-emerald-300 flex items-center justify-between gap-1.5 flex-wrap">
+                  <span className="flex items-center gap-1.5">
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    <span>Post-Verification Payout Account (Flat ₹3/ride fee · Remainder Auto-Transferred)</span>
+                  </span>
+                  {(firebasePhoneLinked || verifiedPhoneNumber) && (
+                    <span className="text-[10px] font-mono-tabular px-2 py-0.5 rounded-full bg-emerald-600/20 text-emerald-800 dark:text-emerald-300">
+                      Firebase Phone Linked
+                    </span>
+                  )}
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   <div className="space-y-1">
@@ -907,39 +937,120 @@ export function DriverOnboardingModal({
           )}
 
           {step === 'demoride' && (
-            <div className="space-y-4 text-center">
-              <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700 text-xs text-stone-800 dark:text-stone-200 space-y-2">
-                <p className="font-semibold text-amber-800 dark:text-amber-300">
-                  Mandatory Free Company Demo Ride Policy
-                </p>
-                <p className="leading-relaxed">
-                  Every onboarding driver passes a 3 km telemetry check ride. Revenue from this calibration ride (₹57) funds Aurelia GPS &amp; safety setup.
+            <div className="space-y-4 text-left">
+              <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-xs text-stone-800 dark:text-stone-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="font-bold text-amber-800 dark:text-[#E6C77E] uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                    <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    <span>Mandatory Company Demo Calibration Ride (3 km)</span>
+                  </p>
+                  <span className="font-mono-tabular font-bold text-emerald-700 dark:text-emerald-400">
+                    ₹57 Credit
+                  </span>
+                </div>
+                <p className="leading-relaxed text-stone-600 dark:text-stone-300">
+                  Every driver completes a 3.0 km telemetry check ride along the Vidhana Soudha → MG Road corridor. Revenue from this calibration ride (₹57 at ₹19/km) is verified and credited towards your account safety setup.
                 </p>
               </div>
 
-              {demoRunning && (
-                <div className="space-y-2">
+              {/* Live Telemetry Calibration Strip */}
+              <div className="p-4 rounded-2xl bg-stone-50 dark:bg-[#080A0F] border border-stone-200 dark:border-white/10 space-y-3">
+                <div className="grid grid-cols-3 gap-2 text-center text-xs font-mono-tabular">
+                  <div className="p-2 rounded-xl bg-white dark:bg-[#101218] border border-stone-200 dark:border-white/10">
+                    <p className="text-[10px] text-stone-500">Distance</p>
+                    <p className="font-bold text-stone-900 dark:text-white">
+                      {((demoProgress * 3.0) / 100).toFixed(1)} / 3.0 km
+                    </p>
+                  </div>
+                  <div className="p-2 rounded-xl bg-white dark:bg-[#101218] border border-stone-200 dark:border-white/10">
+                    <p className="text-[10px] text-stone-500">Calibrated Speed</p>
+                    <p className="font-bold text-emerald-700 dark:text-emerald-400">
+                      {demoRunning ? '42 km/h' : demoProgress === 100 ? '0 km/h (Done)' : '0 km/h'}
+                    </p>
+                  </div>
+                  <div className="p-2 rounded-xl bg-white dark:bg-[#101218] border border-stone-200 dark:border-white/10">
+                    <p className="text-[10px] text-stone-500">GPS Signal</p>
+                    <p className="font-bold text-emerald-700 dark:text-emerald-400">
+                      Lock (100%)
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
                   <div className="flex justify-between text-xs font-mono-tabular text-stone-600 dark:text-stone-300">
-                    <span>Simulating Demo Ride (3 km)...</span>
-                    <span>{demoProgress}%</span>
+                    <span>Telemetry Progress</span>
+                    <span className="font-bold">{demoProgress}%</span>
                   </div>
                   <div className="h-3 w-full rounded-full bg-stone-200 dark:bg-stone-800 overflow-hidden">
                     <div
-                      className="h-full bg-amber-500 transition-all duration-500"
+                      className="h-full bg-emerald-500 transition-all duration-300"
                       style={{ width: `${demoProgress}%` }}
                     />
                   </div>
                 </div>
-              )}
+
+                {/* Checkpoints */}
+                <div className="space-y-1.5 text-[11px] pt-1">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2
+                      className={`w-3.5 h-3.5 ${
+                        demoProgress >= 30 ? 'text-emerald-600' : 'text-stone-400'
+                      }`}
+                    />
+                    <span className={demoProgress >= 30 ? 'text-stone-900 dark:text-white font-medium' : 'text-stone-500'}>
+                      Checkpoint 1: Vidhana Soudha GPS &amp; Fare Meter Calibration
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2
+                      className={`w-3.5 h-3.5 ${
+                        demoProgress >= 70 ? 'text-emerald-600' : 'text-stone-400'
+                      }`}
+                    />
+                    <span className={demoProgress >= 70 ? 'text-stone-900 dark:text-white font-medium' : 'text-stone-500'}>
+                      Checkpoint 2: MG Road Speed Limit &amp; Overrun Safety Warning Check
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2
+                      className={`w-3.5 h-3.5 ${
+                        demoProgress >= 100 ? 'text-emerald-600' : 'text-stone-400'
+                      }`}
+                    />
+                    <span className={demoProgress >= 100 ? 'text-stone-900 dark:text-white font-medium' : 'text-stone-500'}>
+                      Checkpoint 3: Brigade Road Terminal &amp; ₹3 Flat Platform Ledger Verification
+                    </span>
+                  </div>
+                </div>
+              </div>
 
               {!demoRunning && demoProgress === 0 && (
                 <button
                   type="button"
+                  data-testid="start-demo-ride-btn"
                   onClick={handleStartDemoRide}
                   className="w-full min-h-[48px] rounded-2xl bg-[#B48A3E] hover:bg-[#9A722A] dark:bg-[#D4AF63] dark:hover:bg-[#E2C27D] text-white dark:text-stone-950 font-semibold text-sm flex items-center justify-center gap-2 shadow-sm cursor-pointer"
                 >
                   <Sparkles className="w-4 h-4" />
-                  <span>Start Free Company Demo Ride</span>
+                  <span>Start Free Company Demo Calibration Ride (3 km)</span>
+                </button>
+              )}
+
+              {demoRunning && (
+                <div className="p-3 text-center rounded-xl bg-amber-500/10 text-amber-800 dark:text-[#E6C77E] text-xs font-semibold animate-pulse">
+                  Calibrating GPS &amp; driving telemetry on Bengaluru corridor...
+                </div>
+              )}
+
+              {demoProgress >= 100 && (
+                <button
+                  type="button"
+                  data-testid="complete-demo-ride-btn"
+                  onClick={() => setStep('success')}
+                  className="w-full min-h-[48px] rounded-2xl bg-emerald-700 hover:bg-emerald-800 dark:bg-emerald-600 dark:hover:bg-emerald-500 text-white font-semibold text-sm flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Calibration Approved · Proceed to Final Approval</span>
                 </button>
               )}
             </div>

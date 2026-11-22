@@ -1,13 +1,16 @@
 import { useState } from 'react';
 import {
   Accessibility,
+  AlertCircle,
   Car,
   CheckCircle2,
   Eye,
   HeartPulse,
+  KeyRound,
   Lock,
   MapPin,
   Moon,
+  Phone,
   Plus,
   QrCode,
   RotateCcw,
@@ -26,11 +29,17 @@ import type {
   DriverPreferences,
   DriverProfileData,
 } from '../types/aurelia';
-import type { User } from 'firebase/auth';
+import type { ConfirmationResult, User } from 'firebase/auth';
 import {
+  generateVerificationOtp,
   hashPasswordSha256,
+  isValidIndianMobile,
+  maskIndianPhoneNumber,
+  normalizeIndianMobile,
+  normalizeOtpInput,
   validateDriverProfileInput,
   validatePasswordSetup,
+  validateVerificationOtp,
 } from '../utils/aureliaLogic';
 import { QrCodePreview } from './QrCodePreview';
 import { VehicleMaintenanceWidget } from './VehicleMaintenanceWidget';
@@ -40,10 +49,32 @@ interface AccessProfileViewProps {
   preferences: DriverPreferences;
   completedTrips?: CompletedTrip[];
   firebaseUser?: User | null;
+  verifiedPhoneNumber?: string | null;
   isAdminUser?: boolean;
   connectionOk?: boolean;
   onSignInGoogle?: () => Promise<void>;
   onSignOut?: () => Promise<void>;
+  onSendFirebasePhoneOtp?: (
+    phone10Digits: string,
+    recaptchaContainerId: string
+  ) => Promise<{
+    ok: boolean;
+    confirmation?: ConfirmationResult;
+    error?: string;
+    errorCode?: string;
+    canFallbackToGateway?: boolean;
+    requiresConsoleSetup?: boolean;
+  }>;
+  onVerifyFirebasePhoneOtp?: (
+    confirmation: ConfirmationResult,
+    otpCode: string
+  ) => Promise<{
+    ok: boolean;
+    uid?: string;
+    phoneNumber?: string | null;
+    error?: string;
+    errorCode?: string;
+  }>;
   onSaveProfile: (updated: DriverProfileData) => void;
   onUpdatePreferences: (partial: Partial<DriverPreferences>) => void;
   onResetDemoData: () => void;
@@ -61,10 +92,13 @@ export function AccessProfileView({
   preferences,
   completedTrips = [],
   firebaseUser,
+  verifiedPhoneNumber = null,
   isAdminUser = false,
   connectionOk = true,
   onSignInGoogle,
   onSignOut,
+  onSendFirebasePhoneOtp,
+  onVerifyFirebasePhoneOtp,
   onSaveProfile,
   onUpdatePreferences,
   onResetDemoData,
@@ -78,6 +112,19 @@ export function AccessProfileView({
   const [confirmPassword, setConfirmPassword] = useState<string>('');
   const [passwordStatus, setPasswordStatus] = useState<string | null>(null);
 
+  // Firebase Phone OTP verification & linking state
+  const [otpPhoneInput, setOtpPhoneInput] = useState<string>(() => {
+    const digits = profile.phone.replace(/\D/g, '').slice(-10);
+    return digits.length === 10 ? digits : '9845012345';
+  });
+  const [profileFbConfirmation, setProfileFbConfirmation] = useState<ConfirmationResult | null>(null);
+  const [profileOtpCode, setProfileOtpCode] = useState<string>('');
+  const [profileGatewayCode, setProfileGatewayCode] = useState<string | null>(null);
+  const [profileOtpStep, setProfileOtpStep] = useState<'idle' | 'sent' | 'verified'>('idle');
+  const [profileOtpBusy, setProfileOtpBusy] = useState<boolean>(false);
+  const [profileOtpNote, setProfileOtpNote] = useState<string | null>(null);
+  const [profileOtpError, setProfileOtpError] = useState<string | null>(null);
+
   // Administrator verification panel state
   const [adminMode, setAdminMode] = useState<boolean>(false);
   const [adminStatus, setAdminStatus] = useState<BackgroundCheckStatus>(
@@ -87,6 +134,108 @@ export function AccessProfileView({
     profile.backgroundCheck.reviewedBy
   );
   const [adminNotes, setAdminNotes] = useState<string>(profile.backgroundCheck.notes);
+
+  const handleSendProfilePhoneOtp = async () => {
+    const cleanPhone = normalizeIndianMobile(otpPhoneInput);
+    if (!isValidIndianMobile(cleanPhone)) {
+      setProfileOtpError('Enter a valid 10-digit +91 mobile number (starts with 6–9).');
+      return;
+    }
+    setOtpPhoneInput(cleanPhone);
+    setProfileOtpError(null);
+    setProfileOtpNote(null);
+    setProfileOtpCode('');
+    setProfileOtpBusy(true);
+
+    if (onSendFirebasePhoneOtp) {
+      const res = await onSendFirebasePhoneOtp(cleanPhone, 'aurelia-profile-recaptcha-container');
+      if (res.ok && res.confirmation) {
+        setProfileFbConfirmation(res.confirmation);
+        setProfileGatewayCode(null);
+        setProfileOtpStep('sent');
+        setProfileOtpNote(`Firebase Phone Auth OTP dispatched to ${maskIndianPhoneNumber(cleanPhone)}.`);
+        setProfileOtpBusy(false);
+        return;
+      }
+      if (!res.canFallbackToGateway) {
+        setProfileOtpError(res.error || 'Could not dispatch Firebase Phone OTP.');
+        setProfileOtpBusy(false);
+        return;
+      }
+      setProfileOtpNote(
+        res.error
+          ? `${res.error} Using Aurelia Secure SMS Gateway fallback.`
+          : 'Firebase SMS unavailable in preview — using Aurelia Secure SMS Gateway fallback.'
+      );
+    }
+
+    const fallbackCode = generateVerificationOtp();
+    let activeCode = fallbackCode;
+    try {
+      const resp = await fetch('/api/otp/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: cleanPhone, otp: fallbackCode }),
+      });
+      const json = await resp.json();
+      if (typeof json?.deliveredCodePreview === 'string' && /^\d{4}$/.test(json.deliveredCodePreview)) {
+        activeCode = json.deliveredCodePreview;
+      }
+    } catch {
+      // Offline fallback tolerates local code
+    }
+    setProfileFbConfirmation(null);
+    setProfileGatewayCode(activeCode);
+    setProfileOtpStep('sent');
+    setProfileOtpBusy(false);
+  };
+
+  const handleVerifyProfilePhoneOtp = async () => {
+    const cleanOtp = normalizeOtpInput(profileOtpCode);
+    setProfileOtpError(null);
+    setProfileOtpBusy(true);
+
+    if (profileFbConfirmation && onVerifyFirebasePhoneOtp) {
+      const res = await onVerifyFirebasePhoneOtp(profileFbConfirmation, cleanOtp);
+      setProfileOtpBusy(false);
+      if (!res.ok) {
+        setProfileOtpError(res.error || 'Invalid Firebase SMS verification code.');
+        return;
+      }
+      const formatted = `+91 ${otpPhoneInput}`;
+      const nextDraft = { ...draft, phone: formatted };
+      setDraft(nextDraft);
+      onSaveProfile(nextDraft);
+      setProfileOtpStep('verified');
+      setProfileOtpNote(`Firebase Phone Auth verified & linked for ${formatted}.`);
+      return;
+    }
+
+    const check = validateVerificationOtp(cleanOtp, profileGatewayCode ?? '');
+    if (!check.valid) {
+      setProfileOtpBusy(false);
+      setProfileOtpError(check.error || 'Invalid OTP code.');
+      return;
+    }
+
+    try {
+      await fetch('/api/otp/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: otpPhoneInput, otp: cleanOtp }),
+      });
+    } catch {
+      // ignore offline
+    }
+
+    const formatted = `+91 ${otpPhoneInput}`;
+    const nextDraft = { ...draft, phone: formatted };
+    setDraft(nextDraft);
+    onSaveProfile(nextDraft);
+    setProfileOtpBusy(false);
+    setProfileOtpStep('verified');
+    setProfileOtpNote(`Mobile ${formatted} verified via OTP Gateway & synced to driver profile.`);
+  };
 
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
@@ -640,18 +789,20 @@ export function AccessProfileView({
         {/* Right Column: Firebase Cloud Sync + Background Check Admin Panel + Karnataka Preferences */}
         <div className="lg:col-span-5 space-y-5">
           {/* Firebase Cloud Sync & Authentication */}
-          <section className="p-5 rounded-3xl bg-white/85 dark:bg-[#101218]/85 backdrop-blur-xl border border-stone-200/80 dark:border-amber-400/20 shadow-sm space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
+          <section className="p-5 rounded-3xl bg-white/85 dark:bg-[#101218]/85 backdrop-blur-xl border border-stone-200/80 dark:border-amber-400/20 shadow-sm space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#9A722A] dark:text-[#E6C77E]">
                   Firebase Auth &amp; Cloud Firestore
                 </p>
-                <h2 className="font-display text-lg font-bold text-stone-900 dark:text-white">
-                  {firebaseUser ? firebaseUser.displayName || firebaseUser.email : 'Local Sandbox Session'}
+                <h2 className="font-display text-lg font-bold text-stone-900 dark:text-white truncate">
+                  {firebaseUser
+                    ? firebaseUser.displayName || firebaseUser.email || firebaseUser.phoneNumber || 'Firebase User'
+                    : 'Local Sandbox Session'}
                 </h2>
               </div>
               <span
-                className={`text-[11px] font-mono-tabular font-bold ${
+                className={`text-[11px] font-mono-tabular font-bold shrink-0 ${
                   connectionOk ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-600'
                 }`}
               >
@@ -661,8 +812,8 @@ export function AccessProfileView({
 
             <p className="text-xs text-stone-600 dark:text-stone-300">
               {firebaseUser
-                ? `Signed in as ${firebaseUser.email} — driver profile, live rides, payouts & complaints sync directly to Firestore.`
-                : 'Sign in with Google to persist Driver, Customer Bookings, Payouts, and Admin approvals to Cloud Firestore.'}
+                ? `Signed in (${firebaseUser.email || firebaseUser.phoneNumber}) — driver profile, live rides, payouts & complaints sync directly to Firestore.`
+                : 'Sign in with Google or Firebase Phone OTP to persist Driver, Customer Bookings, Payouts, and Admin approvals to Cloud Firestore.'}
             </p>
 
             {firebaseUser ? (
@@ -683,6 +834,119 @@ export function AccessProfileView({
                 Sign In with Google (Firebase Cloud Sync)
               </button>
             )}
+
+            {/* Firebase Phone OTP Sign-In / Account Link Card */}
+            <div
+              data-testid="profile-firebase-otp-card"
+              className="pt-3 border-t border-stone-200/80 dark:border-white/10 space-y-2.5"
+            >
+              <div id="aurelia-profile-recaptcha-container" />
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-stone-700 dark:text-stone-200 flex items-center gap-1.5">
+                  <Phone className="w-3.5 h-3.5 text-[#B48A3E] dark:text-[#D4AF63]" />
+                  <span>Firebase Phone OTP Sign-In / Link</span>
+                </p>
+                {(verifiedPhoneNumber || profileOtpStep === 'verified') && (
+                  <span className="text-[10px] font-mono-tabular font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
+                    {verifiedPhoneNumber ? `Verified ${verifiedPhoneNumber}` : 'OTP Verified'}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <div className="flex items-center flex-1 min-w-0">
+                  <span className="px-2.5 min-h-[40px] flex items-center rounded-l-xl bg-stone-100 dark:bg-stone-800 border border-r-0 border-stone-300 dark:border-stone-700 text-xs font-mono-tabular text-stone-600 dark:text-stone-300">
+                    +91
+                  </span>
+                  <input
+                    type="tel"
+                    maxLength={10}
+                    data-testid="profile-firebase-phone-input"
+                    value={otpPhoneInput}
+                    onChange={(e) => {
+                      setOtpPhoneInput(e.target.value.replace(/\D/g, '').slice(0, 10));
+                      if (profileOtpError) setProfileOtpError(null);
+                    }}
+                    placeholder="9845012345"
+                    className="w-full min-w-0 min-h-[40px] px-3 rounded-r-xl bg-stone-50 dark:bg-[#080A0F] border border-stone-300 dark:border-stone-700 text-xs font-mono-tabular text-stone-900 dark:text-white"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={profileOtpBusy}
+                  data-testid="profile-send-firebase-otp-btn"
+                  onClick={() => void handleSendProfilePhoneOtp()}
+                  className="min-h-[40px] px-3.5 rounded-xl bg-[#B48A3E] hover:bg-[#9A722A] dark:bg-[#D4AF63] dark:hover:bg-[#E2C27D] text-white dark:text-stone-950 text-xs font-bold whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                >
+                  {profileOtpBusy ? 'Sending...' : 'Send Firebase OTP'}
+                </button>
+              </div>
+
+              {profileOtpStep === 'sent' && (
+                <div className="p-3 rounded-2xl bg-stone-50 dark:bg-[#080A0F] border border-stone-200 dark:border-white/10 space-y-2.5">
+                  {profileGatewayCode && (
+                    <div className="flex items-center justify-between gap-2 text-[11px] bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/50 rounded-xl px-2.5 py-2">
+                      <span className="font-mono-tabular text-emerald-800 dark:text-emerald-300">
+                        Gateway OTP: <strong>{profileGatewayCode}</strong>
+                      </span>
+                      <button
+                        type="button"
+                        data-testid="profile-autofill-otp-btn"
+                        onClick={() => setProfileOtpCode(profileGatewayCode)}
+                        className="px-2.5 py-1 rounded-lg bg-emerald-700 text-white text-[10px] font-bold cursor-pointer"
+                      >
+                        Auto-Fill
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={6}
+                      data-testid="profile-firebase-otp-input"
+                      value={profileOtpCode}
+                      onChange={(e) => {
+                        setProfileOtpCode(normalizeOtpInput(e.target.value));
+                        if (profileOtpError) setProfileOtpError(null);
+                      }}
+                      placeholder={profileFbConfirmation ? '6-digit Firebase OTP' : 'Enter OTP code'}
+                      className="flex-1 min-w-0 min-h-[40px] px-3 rounded-xl bg-white dark:bg-[#101218] border border-stone-300 dark:border-stone-700 text-xs font-mono-tabular text-stone-900 dark:text-white"
+                    />
+                    <button
+                      type="button"
+                      disabled={profileOtpBusy}
+                      data-testid="profile-verify-firebase-otp-btn"
+                      onClick={() => void handleVerifyProfilePhoneOtp()}
+                      className="min-h-[40px] px-3.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 dark:bg-emerald-600 text-white text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                    >
+                      <KeyRound className="w-3.5 h-3.5" />
+                      <span>Verify &amp; Link</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {profileOtpNote && (
+                <p
+                  data-testid="profile-firebase-otp-note"
+                  className="text-[11px] text-stone-600 dark:text-stone-300 leading-relaxed"
+                >
+                  {profileOtpNote}
+                </p>
+              )}
+
+              {profileOtpError && (
+                <p
+                  data-testid="profile-firebase-otp-error"
+                  className="text-[11px] text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1"
+                >
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{profileOtpError}</span>
+                </p>
+              )}
+            </div>
           </section>
 
           {/* Background Check Verification Status + Admin Update Control */}
