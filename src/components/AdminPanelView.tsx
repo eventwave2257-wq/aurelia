@@ -87,6 +87,12 @@ export function AdminPanelView({
   const [copiedOtpId, setCopiedOtpId] = useState<string | null>(null);
   const [phoneSearch, setPhoneSearch] = useState<string>('');
 
+  const filteredOtpLogs = otpLogs.filter((log) => {
+    const query = phoneSearch.trim().toLowerCase();
+    if (!query) return true;
+    return `${log.phone} ${log.maskedPhone}`.toLowerCase().includes(query);
+  });
+
   const fetchOtpLogs = async () => {
     setLoadingOtpLogs(true);
     try {
@@ -445,6 +451,9 @@ export function AdminPanelView({
               )}
             </div>
           ))}
+        </div>
+      </section>
+
       {/* 4. Live Dispatched OTP & SMS Gateway Audit Logs (Admin Only) */}
       <section
         data-testid="admin-otp-dispatch-audit-section"
